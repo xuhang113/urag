@@ -20,6 +20,7 @@ type pageData struct {
 	Fetch  *fetchView
 	Clean  *cleanView
 	Ask    *askView
+	Try    *tryView
 	Eval   *evalView
 }
 
@@ -51,6 +52,10 @@ type askView struct {
 	TopK        int
 	Hybrid      bool
 	Hits        []retrieve.Hit
+}
+
+type tryView struct {
+	Collection string
 }
 
 type evalView struct {
@@ -167,6 +172,11 @@ func (s *server) pageAsk(w http.ResponseWriter, r *http.Request) {
 	s.render(w, data)
 }
 
+func (s *server) pageTry(w http.ResponseWriter, r *http.Request) {
+	data := pageData{Page: "try", Title: "试查", Try: &tryView{Collection: "public"}}
+	s.render(w, data)
+}
+
 func (s *server) pageEval(w http.ResponseWriter, r *http.Request) {
 	data := pageData{Page: "eval", Title: "评价", Eval: &evalView{}}
 	if r.Method == http.MethodPost {
@@ -203,7 +213,7 @@ func (s *server) render(w http.ResponseWriter, data pageData) {
 	}
 }
 
-var pageTmpl = template.Must(template.New("layout").Parse(layoutHTML + uploadHTML + fetchHTML + cleanHTML + askHTML + evalHTML))
+var pageTmpl = template.Must(template.New("layout").Parse(layoutHTML + uploadHTML + fetchHTML + cleanHTML + askHTML + tryHTML + evalHTML))
 
 const layoutHTML = `{{define "layout"}}<!DOCTYPE html>
 <html lang="zh-CN">
@@ -217,7 +227,7 @@ main { margin-top: 1.5rem; }
 label { display: block; margin: 0.8rem 0 0.2rem; }
 input, select, button, textarea { font: inherit; }
 table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
-th, td { border: 1px solid #ccc; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+th, td { border: 1px solid #ccc; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; word-break: break-word; }
 .err { color: #8a1f1f; }
 .meta dt { font-weight: 600; }
 .meta dd { margin: 0 0 0.4rem; word-break: break-all; }
@@ -229,6 +239,7 @@ th, td { border: 1px solid #ccc; padding: 0.35rem 0.5rem; text-align: left; vert
 <a href="/fetch">获取</a>
 <a href="/clean">清洗</a>
 <a href="/ask">提问</a>
+<a href="/try">试查</a>
 <a href="/eval">评价</a>
 </nav>
 <main id="page-{{.Page}}">
@@ -238,6 +249,7 @@ th, td { border: 1px solid #ccc; padding: 0.35rem 0.5rem; text-align: left; vert
 {{if eq .Page "fetch"}}{{template "fetch" .}}{{end}}
 {{if eq .Page "clean"}}{{template "clean" .}}{{end}}
 {{if eq .Page "ask"}}{{template "ask" .}}{{end}}
+{{if eq .Page "try"}}{{template "try" .}}{{end}}
 {{if eq .Page "eval"}}{{template "eval" .}}{{end}}
 </main>
 </body>
@@ -339,6 +351,76 @@ const askHTML = `{{define "ask"}}
 </tbody>
 </table>
 {{end}}{{end}}
+{{end}}`
+
+const tryHTML = `{{define "try"}}
+<p>只查集合 {{.Try.Collection}}。磁盘向量和这个集合的 BM25 合并后留下前 50 条，再重排，最多显示 8 条。嵌入模型退出后才加载重排模型。</p>
+<form id="try-form">
+<label for="query">问题</label>
+<input id="query" name="query" required>
+<button type="submit">试查</button>
+</form>
+<p id="try-status"></p>
+<p id="try-error" class="err"></p>
+<div id="try-result"></div>
+<script>
+(function () {
+  var form = document.getElementById("try-form");
+  var status = document.getElementById("try-status");
+  var err = document.getElementById("try-error");
+  var result = document.getElementById("try-result");
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var query = document.getElementById("query").value;
+    err.textContent = "";
+    result.textContent = "";
+    status.textContent = "正在检索。先加载嵌入模型，退出后再加载重排模型。";
+    fetch("/api/try", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({query: query})
+    }).then(function (res) {
+      return res.text().then(function (text) {
+        if (!res.ok) {
+          throw new Error(text || ("HTTP " + res.status));
+        }
+        return JSON.parse(text);
+      });
+    }).then(function (hits) {
+      status.textContent = "命中 " + hits.length + " 条";
+      if (!hits.length) {
+        return;
+      }
+      var table = document.createElement("table");
+      var head = document.createElement("tr");
+      ["collection_id", "heading_path", "原文位置", "分数", "子块", "父块"].forEach(function (name) {
+        var th = document.createElement("th");
+        th.textContent = name;
+        head.appendChild(th);
+      });
+      var thead = document.createElement("thead");
+      thead.appendChild(head);
+      table.appendChild(thead);
+      var body = document.createElement("tbody");
+      hits.forEach(function (hit) {
+        var tr = document.createElement("tr");
+        var pos = String(hit.start_byte) + "–" + String(hit.end_byte);
+        [hit.collection_id, hit.heading_path || "", pos, String(hit.score), hit.chunk || "", hit.parent || ""].forEach(function (value) {
+          var td = document.createElement("td");
+          td.textContent = value == null ? "" : String(value);
+          tr.appendChild(td);
+        });
+        body.appendChild(tr);
+      });
+      table.appendChild(body);
+      result.appendChild(table);
+    }).catch(function (e) {
+      status.textContent = "";
+      err.textContent = e && e.message ? e.message : "检索失败";
+    });
+  });
+})();
+</script>
 {{end}}`
 
 const evalHTML = `{{define "eval"}}

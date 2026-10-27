@@ -41,7 +41,7 @@ type server struct {
 // Handler 注册页面和 JSON API。
 //
 //	GET / 跳转到 /upload。
-//	GET /upload、/fetch、/clean、/ask、/eval 返回对应页面。
+//	GET /upload、/fetch、/clean、/ask、/try、/eval 返回对应页面。
 //	POST /api/uploads 接受表单字段 collection、idempotency_key、file。
 //	成功时返回 202，JSON 含 job_id、object_key、checksum、size、collection_id。
 //	文件流式交给 job.Pipeline.AcceptUpload。
@@ -50,6 +50,7 @@ type server struct {
 //	GET /api/jobs/{id} 返回 job.Job。
 //	GET /api/collections/{id}/documents 返回该集合的文档。
 //	POST /api/retrieve 的 JSON 正文是 retrieve.Request，响应是 []retrieve.Hit。
+//	POST /api/try 只接受 JSON 字段 query，只检索集合 public。
 //	POST /api/eval 与 GET /api/eval/report 同时返回正常和对照报告。
 func Handler(p *job.Pipeline) http.Handler {
 	s := &server{p: p}
@@ -61,6 +62,7 @@ func Handler(p *job.Pipeline) http.Handler {
 	mux.HandleFunc("POST /fetch", s.pageFetch)
 	mux.HandleFunc("GET /clean", s.pageClean)
 	mux.HandleFunc("GET /ask", s.pageAsk)
+	mux.HandleFunc("GET /try", s.pageTry)
 	mux.HandleFunc("GET /eval", s.pageEval)
 	mux.HandleFunc("POST /eval", s.pageEval)
 	mux.HandleFunc("POST /api/uploads", s.apiUpload)
@@ -68,6 +70,7 @@ func Handler(p *job.Pipeline) http.Handler {
 	mux.HandleFunc("GET /api/jobs/{id}", s.apiJob)
 	mux.HandleFunc("GET /api/collections/{id}/documents", s.apiDocuments)
 	mux.HandleFunc("POST /api/retrieve", s.apiRetrieve)
+	mux.HandleFunc("POST /api/try", s.apiTry)
 	mux.HandleFunc("POST /api/eval", s.apiEval)
 	mux.HandleFunc("GET /api/eval/report", s.apiEval)
 	return mux
@@ -134,6 +137,34 @@ func (s *server) apiDocuments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, docs)
+}
+
+func (s *server) apiTry(w http.ResponseWriter, r *http.Request) {
+	if err := s.requirePipeline(); err != nil {
+		writeError(w, err)
+		return
+	}
+	var in struct {
+		Query string `json:"query"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
+	if err := dec.Decode(&in); err != nil {
+		http.Error(w, "web: bad request", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(in.Query) == "" {
+		http.Error(w, "web: query required", http.StatusBadRequest)
+		return
+	}
+	hits, err := s.p.Try(r.Context(), in.Query)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if hits == nil {
+		hits = []retrieve.Hit{}
+	}
+	writeJSON(w, http.StatusOK, hits)
 }
 
 func (s *server) apiRetrieve(w http.ResponseWriter, r *http.Request) {

@@ -191,6 +191,45 @@ func (o *orderEmbedder) Embed(context.Context, []string) ([]embed.Vector, error)
 	return []embed.Vector{{1}}, nil
 }
 
+func TestTryDoesNotCreateVectors(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("URAG_DATA_DIR", dir)
+	t.Setenv("URAG_MYSQL_DSN", "")
+	t.Setenv("URAG_EMBED_MODEL_DIR", "")
+	t.Setenv("URAG_RERANK_MODEL_DIR", "")
+	t.Setenv("URAG_MILVUS_ADDR", "")
+	err := run([]string{"try", "extra"})
+	if err == nil || !strings.Contains(err.Error(), "不接收参数") {
+		t.Fatal(err)
+	}
+	err = run([]string{"try"})
+	if err == nil || !strings.Contains(err.Error(), "不会新建") {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "vectors")); !os.IsNotExist(statErr) {
+		t.Fatalf("created vectors: %v", statErr)
+	}
+}
+
+func TestTryCommandDoesNotWriteDSN(t *testing.T) {
+	body, err := os.ReadFile("try_cmd.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, frag := range []string{"@tcp(", "19530", "milvus.example", "password"} {
+		if strings.Contains(text, frag) {
+			t.Fatalf("contains %s", frag)
+		}
+	}
+	if !strings.Contains(text, "URAG_MYSQL_DSN") || !strings.Contains(text, "NewQwenReranker") {
+		t.Fatal("try command missing ledger or rerank hook")
+	}
+	if strings.Contains(text, ".Start(") {
+		t.Fatal("try keeps an embed process resident")
+	}
+}
+
 func TestCrawlExitsWhenModelDirMissing(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seeds.txt")
 	if err := os.WriteFile(path, []byte("http://127.0.0.1/sitemap.xml\n"), 0o644); err != nil {

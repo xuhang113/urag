@@ -65,6 +65,8 @@ func run(args []string) error {
 		return indexCollection(args[1:])
 	case "search":
 		return searchCollection(args[1:])
+	case "try":
+		return tryPage(args[1:])
 	default:
 		return fmt.Errorf("urag: unknown command %q", cmd)
 	}

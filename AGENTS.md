@@ -15,7 +15,7 @@
 - `internal/eval` 计算 Recall@K 和 MRR，不改索引。
 - `internal/job` 编排任务，不提供页面。
 - `internal/web` 只做页面和 JSON。不算向量，不把上传正文读进内存。
-- `cmd/urag` 只组装依赖。`serve` 监听验收页，`crawl` 按种子文件收录。`index` 把子块写入 Milvus。`search` 在点名集合里做向量和 BM25 检索。
+- `cmd/urag` 只组装依赖。`serve` 监听验收页，`try` 用已有磁盘向量打开本机试查页，`crawl` 按种子文件收录。`index` 把子块写入 Milvus。`search` 在点名集合里做向量和 BM25 检索。
 
 ## 测试
 

@@ -108,4 +108,19 @@ go run ./cmd/urag serve
 - `GET /api/jobs/{id}`
 - `GET /api/collections/{id}/documents`
 - `POST /api/retrieve`
+- `POST /api/try`
 - `POST /api/eval` 和 `GET /api/eval/report`
+
+## 磁盘试查
+
+`urag try` 只打开磁盘索引里的集合 `public`，用来看已经写入磁盘的向量。不连接 Milvus，不新建向量文件，也不启动收录。
+
+```bash
+go run ./cmd/urag try
+```
+
+`URAG_DATA_DIR/vectors` 里要已有该集合的 `records.bin`。嵌入权重是 `URAG_EMBED_MODEL_DIR`。重排权重优先用 `URAG_RERANK_MODEL_DIR`，否则找嵌入目录旁边的 `Qwen3-Reranker-4B`。目录不存在就退出，不下载。
+
+页面监听 `127.0.0.1:8080`。这个端口已被占用时改用 `127.0.0.1:8088`。浏览器打开 `/try`。`POST /api/try` 的 JSON 只有 `query`。向量和该集合 BM25 合并后留下前 50 条，重排后最多返回 8 条。响应里的 `chunk` 是子块，`parent` 是父块正文；父块查不到时没有 `parent`。原文位置是 `start_byte` 和 `end_byte`。
+
+一次提问先加载嵌入模型，算出查询向量后退出，再加载重排模型。两个权重不会同时留在内存里。已设置 `URAG_MYSQL_DSN` 时用它读取父块，错误文本不带连接串。没有这个变量时只显示子块。原有 `/ask` 仍在。

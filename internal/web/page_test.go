@@ -2,9 +2,11 @@ package web_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -357,6 +359,193 @@ func uploadForm(t *testing.T, collection, idem, filename string, payload []byte)
 		t.Fatal(err)
 	}
 	return &buf, w.FormDataContentType()
+}
+
+func TestPageTry(t *testing.T) {
+	ctx := context.Background()
+	meta := embed.ModelMeta{Name: "fixture", Dim: 8}
+	emb := embed.NewFixture(meta.Dim)
+	reg, err := index.NewDisk(t.TempDir(), meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk, ok := reg.(*index.Disk)
+	if !ok {
+		t.Fatalf("%T", reg)
+	}
+	qvec := mustEmbed(t, emb, embed.QueryText("crimson lantern"))
+	if err := disk.UpsertRecords(ctx, []index.VectorRecord{
+		{
+			ChunkID: "c1", ParentID: 42, DocID: 7, CollectionID: "public",
+			HeadingPath: "东桥", Body: "crimson lantern east bridge",
+			StartByte: 3, EndByte: 9, Vector: qvec,
+		},
+		{
+			ChunkID: "secret-1", ParentID: 99, DocID: 8, CollectionID: "secret",
+			HeadingPath: "隐藏", Body: "crimson lantern secret",
+			StartByte: 1, EndByte: 2, Vector: append(embed.Vector(nil), qvec...),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	opened := &openRecord{inner: reg}
+	closer := &closeEmbedder{inner: emb}
+	store, err := storage.NewLocal(t.TempDir(), storage.RetryPolicy{MaxAttempts: 3}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := job.New(job.Config{
+		Inline:  true,
+		DataDir: t.TempDir(),
+		Weights: retrieve.Weights{Vector: 0.7, Keyword: 0.3},
+		Chunk:   chunk.Options{MaxLen: 800, Overlap: 100},
+	}, job.Deps{
+		Store:    store,
+		Embedder: closer,
+		Registry: opened,
+		Reranker: retrieve.NewOverlapReranker(),
+		Splitter: chunk.NewParagraph(),
+		Cleaner:  clean.New(clean.NewMemoryDeduper()),
+		Passages: &closedReranker{emb: closer, score: 0.25},
+		Parents:  parentBody{42: "父节正文"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := web.Handler(p)
+
+	page := get(t, h, "/try")
+	if page.Code != http.StatusOK {
+		t.Fatalf("GET /try status %d body %s", page.Code, page.Body.String())
+	}
+	body := page.Body.String()
+	if !strings.Contains(body, "page-try") || !strings.Contains(body, "public") || !strings.Contains(body, "/api/try") {
+		t.Fatalf("try page: %s", body)
+	}
+	ask := get(t, h, "/ask")
+	if ask.Code != http.StatusOK || !strings.Contains(ask.Body.String(), "page-ask") || !strings.Contains(ask.Body.String(), "提问") {
+		t.Fatalf("ask page missing: %d %s", ask.Code, ask.Body.String())
+	}
+
+	empty := postJSON(t, h, "/api/try", map[string]any{"query": "  ", "collections": []string{"secret"}})
+	if empty.Code != http.StatusBadRequest {
+		t.Fatalf("empty query %d %s", empty.Code, empty.Body.String())
+	}
+
+	got := postJSON(t, h, "/api/try", map[string]any{
+		"query":       "crimson lantern",
+		"collections": []string{"secret"},
+	})
+	if got.Code != http.StatusOK {
+		t.Fatalf("POST /api/try %d %s", got.Code, got.Body.String())
+	}
+	var hits []retrieve.Hit
+	if err := json.Unmarshal(got.Body.Bytes(), &hits); err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("hits %d", len(hits))
+	}
+	hit := hits[0]
+	if hit.CollectionID != "public" || hit.ChunkID != "c1" || hit.HeadingPath != "东桥" {
+		t.Fatalf("%+v", hit)
+	}
+	if hit.ChildText != "crimson lantern east bridge" || hit.ParentText != "父节正文" {
+		t.Fatalf("chunk/parent %+v", hit)
+	}
+	if hit.StartByte != 3 || hit.EndByte != 9 || hit.Score != 0.25 {
+		t.Fatalf("span/score %+v", hit)
+	}
+	if !closer.closed {
+		t.Fatal("embedder still open after retrieve")
+	}
+	if len(opened.ids) != 1 || opened.ids[0] != "public" {
+		t.Fatalf("opened %v", opened.ids)
+	}
+}
+
+func postJSON(t *testing.T, h http.Handler, target string, payload any) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, target, bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func mustEmbed(t *testing.T, emb embed.Embedder, text string) embed.Vector {
+	t.Helper()
+	vecs, err := emb.Embed(context.Background(), []string{text})
+	if err != nil || len(vecs) != 1 {
+		t.Fatal(err)
+	}
+	return vecs[0]
+}
+
+type openRecord struct {
+	inner index.Registry
+	ids   []model.CollectionID
+}
+
+func (o *openRecord) Open(ctx context.Context, id model.CollectionID) (index.Index, error) {
+	o.ids = append(o.ids, id)
+	return o.inner.Open(ctx, id)
+}
+
+func (o *openRecord) Get(id model.CollectionID) (index.Index, bool) {
+	return o.inner.Get(id)
+}
+
+type closeEmbedder struct {
+	inner  embed.Embedder
+	closed bool
+}
+
+func (c *closeEmbedder) Dim() int { return c.inner.Dim() }
+
+func (c *closeEmbedder) Embed(ctx context.Context, texts []string) ([]embed.Vector, error) {
+	return c.inner.Embed(ctx, texts)
+}
+
+func (c *closeEmbedder) Close() error {
+	c.closed = true
+	return nil
+}
+
+type closedReranker struct {
+	emb   *closeEmbedder
+	score float64
+}
+
+func (c *closedReranker) Score(ctx context.Context, query string, passages []string) ([]float64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if c.emb == nil || !c.emb.closed {
+		return nil, errors.New("rerank while embedder is open")
+	}
+	out := make([]float64, len(passages))
+	for i := range out {
+		out[i] = c.score
+	}
+	return out, nil
+}
+
+type parentBody map[int64]string
+
+func (p parentBody) GetParent(ctx context.Context, id int64) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	body, ok := p[id]
+	if !ok {
+		return "", errors.New("missing parent")
+	}
+	return body, nil
 }
 
 func postUpload(t *testing.T, h http.Handler, collection, idem string, payload []byte) {

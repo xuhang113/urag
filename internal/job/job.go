@@ -170,6 +170,10 @@ type Deps struct {
 	Cleaner  clean.Cleaner
 	Catalog  catalog.Store
 	Vectors  VectorWriter
+	// Passages 给试查重排打分。为空时 Try 返回错误。提问仍用 Reranker。
+	Passages retrieve.PassageReranker
+	// Parents 按父块编号取整节正文。为空时试查只保留子块正文。
+	Parents retrieve.ParentLookup
 }
 
 // Pipeline 是上传、抓取、检索和评价的任务入口。
@@ -178,10 +182,11 @@ type Pipeline struct {
 	deps Deps
 	svc  retrieve.Service
 
-	mu   sync.Mutex
-	jobs map[string]*jobRecord
-	docs map[model.CollectionID][]model.Document
-	sem  chan struct{}
+	mu    sync.Mutex
+	tryMu sync.Mutex
+	jobs  map[string]*jobRecord
+	docs  map[model.CollectionID][]model.Document
+	sem   chan struct{}
 }
 
 type jobRecord struct {

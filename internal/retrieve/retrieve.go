@@ -46,6 +46,10 @@ type Hit struct {
 	EndByte      int                `json:"end_byte"`
 	ParentID     int64              `json:"parent_id"`
 	HeadingPath  string             `json:"heading_path"`
+	// ChildText 是子块正文。父块写入 Text 之后，这里仍保留子块。JSON 字段是 chunk。
+	ChildText string `json:"chunk,omitempty"`
+	// ParentText 是父块正文。查不到时为空，Text 保持子块。JSON 字段是 parent。
+	ParentText string `json:"parent,omitempty"`
 }
 
 const (
@@ -366,12 +370,16 @@ func mergeChildHits(col model.CollectionID, vecHits, kwHits []index.Hit, w Weigh
 				EndByte:      h.Chunk.EndByte,
 				ParentID:     h.ParentID,
 				HeadingPath:  h.HeadingPath,
+				ChildText:    h.Chunk.Text,
 			}}
 			byID[id] = item
 			order = append(order, id)
 		} else {
 			if item.hit.Text == "" {
 				item.hit.Text = h.Chunk.Text
+			}
+			if item.hit.ChildText == "" {
+				item.hit.ChildText = h.Chunk.Text
 			}
 			if item.hit.DocumentID == "" {
 				item.hit.DocumentID = h.Chunk.DocumentID
@@ -432,6 +440,9 @@ func applyParents(ctx context.Context, hits []Hit, parents ParentLookup) ([]Hit,
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		if hits[i].ChildText == "" {
+			hits[i].ChildText = hits[i].Text
+		}
 		body, err := parents.GetParent(ctx, hits[i].ParentID)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -442,9 +453,45 @@ func applyParents(ctx context.Context, hits []Hit, parents ParentLookup) ([]Hit,
 		if body == "" {
 			continue
 		}
+		hits[i].ParentText = body
 		hits[i].Text = body
 	}
 	return hits, nil
+}
+
+// ReleaseOnEmbed 在 Embed 返回前调用 release，并且只调用一次。
+// 调用方用它关掉嵌入进程，然后再加载重排模型。
+func ReleaseOnEmbed(inner embed.Embedder, release func() error) embed.Embedder {
+	return &releasingEmbedder{inner: inner, release: release}
+}
+
+type releasingEmbedder struct {
+	inner   embed.Embedder
+	release func() error
+}
+
+func (r *releasingEmbedder) Dim() int {
+	if r == nil || r.inner == nil {
+		return 0
+	}
+	return r.inner.Dim()
+}
+
+func (r *releasingEmbedder) Embed(ctx context.Context, texts []string) ([]embed.Vector, error) {
+	defer r.finish()
+	if r == nil || r.inner == nil {
+		return nil, errors.New("retrieve: nil embedder")
+	}
+	return r.inner.Embed(ctx, texts)
+}
+
+func (r *releasingEmbedder) finish() {
+	if r == nil || r.release == nil {
+		return
+	}
+	release := r.release
+	r.release = nil
+	_ = release()
 }
 
 type overlapReranker struct{}

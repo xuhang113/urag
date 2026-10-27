@@ -136,6 +136,9 @@ func TestRetrieveChildrenRerankAndParent(t *testing.T) {
 	if hits[0].Text != "父节 1020" || hits[0].HeadingPath != "Sec 1020" || hits[0].ParentID != 9020 {
 		t.Fatalf("%+v", hits[0])
 	}
+	if hits[0].ChildText != "crimson lantern item1020" || hits[0].ParentText != "父节 1020" {
+		t.Fatalf("chunk/parent %+v", hits[0])
+	}
 	if hits[0].StartByte != 0 || hits[0].EndByte != 0 {
 		t.Fatalf("bytes %+v", hits[0])
 	}
@@ -144,6 +147,9 @@ func TestRetrieveChildrenRerankAndParent(t *testing.T) {
 	}
 	if hits[7].DocumentID != "1027" || hits[7].Text != "crimson lantern item1027" || hits[7].ParentID != 9027 {
 		t.Fatalf("%+v", hits[7])
+	}
+	if hits[7].ChildText != "crimson lantern item1027" || hits[7].ParentText != "" {
+		t.Fatalf("missing parent kept chunk %+v", hits[7])
 	}
 	for _, hit := range hits {
 		if hit.CollectionID == "" || hit.DocumentID == "" || hit.ChunkID == "" || hit.Text == "" {
@@ -187,7 +193,7 @@ func TestRetrieveChildrenKeepsShortList(t *testing.T) {
 		t.Fatalf("hits %d passages %d", len(hits), len(rr.passages))
 	}
 	for _, hit := range hits {
-		if !strings.HasPrefix(hit.Text, "crimson lantern item") {
+		if !strings.HasPrefix(hit.Text, "crimson lantern item") || hit.ChildText != hit.Text || hit.ParentText != "" {
 			t.Fatalf("nil parents replaced text %+v", hit)
 		}
 	}
@@ -202,6 +208,44 @@ func TestRetrieveChildrenKeepsShortList(t *testing.T) {
 	if len(hits) != 3 || hits[0].Text != "父节 1" || hits[2].Text != "父节 3" {
 		t.Fatalf("%+v", hits)
 	}
+	if hits[0].ChildText != "crimson lantern item1" || hits[0].ParentText != "父节 1" {
+		t.Fatalf("chunk/parent %+v", hits[0])
+	}
+}
+
+func TestReleaseOnEmbedClosesBeforeReturn(t *testing.T) {
+	var order []string
+	inner := &markEmbedder{mark: func() { order = append(order, "embed") }}
+	emb := retrieve.ReleaseOnEmbed(inner, func() error {
+		order = append(order, "close")
+		return nil
+	})
+	vecs, err := emb.Embed(context.Background(), []string{"crimson"})
+	if err != nil || len(vecs) != 1 || len(vecs[0]) != 4 {
+		t.Fatal(err)
+	}
+	if strings.Join(order, ",") != "embed,close" {
+		t.Fatalf("%v", order)
+	}
+	if _, err := emb.Embed(context.Background(), []string{"again"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(order, ",") != "embed,close,embed" {
+		t.Fatalf("%v", order)
+	}
+}
+
+type markEmbedder struct {
+	mark func()
+}
+
+func (m *markEmbedder) Dim() int { return 4 }
+
+func (m *markEmbedder) Embed(ctx context.Context, texts []string) ([]embed.Vector, error) {
+	if m.mark != nil {
+		m.mark()
+	}
+	return embed.NewFixture(4).Embed(ctx, texts)
 }
 
 type captureReranker struct {
