@@ -308,7 +308,7 @@ func acceptanceHandler(t *testing.T) http.Handler {
 		Registry: index.NewMemory(),
 		Reranker: retrieve.NewOverlapReranker(),
 		Splitter: chunk.NewParagraph(),
-		Cleaner:  clean.New(nil),
+		Cleaner:  clean.New(clean.NewMemoryDeduper()),
 	})
 	if err != nil {
 		t.Fatalf("pipeline: %v", err)

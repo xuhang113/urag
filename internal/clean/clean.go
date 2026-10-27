@@ -20,6 +20,8 @@ var (
 
 	// ErrNotImplemented 保留给旧调用方识别未接通的桩。接通后的 Clean 不再返回它。
 	ErrNotImplemented = errors.New("clean: not implemented")
+
+	errBindingExists = errors.New("clean: dedupe binding exists")
 )
 
 // Input 是一篇待清洗的原始对象。

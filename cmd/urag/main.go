@@ -64,7 +64,7 @@ func serve() error {
 		Registry: index.NewMemory(),
 		Reranker: retrieve.NewOverlapReranker(),
 		Splitter: chunk.NewParagraph(),
-		Cleaner:  clean.New(nil),
+		Cleaner:  clean.New(clean.NewMemoryDeduper()),
 	})
 	if err != nil {
 		return err
