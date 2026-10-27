@@ -90,6 +90,7 @@ def embed_batch(req):
     )
     model.to(device)
     model.eval()
+    model.config.use_cache = False
     batch = tokenizer(
         list(texts),
         padding=True,

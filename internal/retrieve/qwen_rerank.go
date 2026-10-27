@@ -64,13 +64,20 @@ func NewQwenRerankerCommand(dir string, argv []string) (PassageReranker, error) 
 	if !info.IsDir() {
 		return nil, fmt.Errorf("retrieve: qwen reranker path %q is not a directory", dir)
 	}
-	if err := readRerankHidden(abs); err != nil {
+	snap, err := embed.ResolveSnapshot(abs, "retrieve: qwen reranker")
+	if err != nil {
 		return nil, err
 	}
-	if _, err := findRerankWeight(abs); err != nil {
+	if err := readRerankHidden(snap); err != nil {
 		return nil, err
 	}
-	return qwenReranker{dir: abs, argv: append([]string(nil), argv...)}, nil
+	if err := embed.WeightsReady(snap, "retrieve: qwen reranker"); err != nil {
+		return nil, err
+	}
+	if err := embed.TokenizerReady(snap, "retrieve: qwen reranker"); err != nil {
+		return nil, err
+	}
+	return qwenReranker{dir: snap, argv: append([]string(nil), argv...)}, nil
 }
 
 func (q qwenReranker) Score(ctx context.Context, query string, passages []string) ([]float64, error) {
@@ -171,21 +178,4 @@ func readRerankHidden(dir string) error {
 		return fmt.Errorf("retrieve: qwen reranker hidden size %d, want 2560, refusing to change dimension", cfg.HiddenSize)
 	}
 	return nil
-}
-
-func findRerankWeight(dir string) (string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := strings.ToLower(entry.Name())
-		if strings.HasSuffix(name, ".safetensors") || strings.HasSuffix(name, ".gguf") || name == "pytorch_model.bin" {
-			return filepath.Join(dir, entry.Name()), nil
-		}
-	}
-	return "", fmt.Errorf("retrieve: qwen reranker weight file missing in %q, refusing to download", dir)
 }

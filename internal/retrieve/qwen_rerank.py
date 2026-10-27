@@ -91,6 +91,9 @@ def score_batch(req):
         raise SystemExit("rerank template longer than the context")
     token_true = tokenizer.convert_tokens_to_ids("yes")
     token_false = tokenizer.convert_tokens_to_ids("no")
+    unk = getattr(tokenizer, "unk_token_id", None)
+    if token_true == token_false or token_true == unk or token_false == unk:
+        raise SystemExit("yes/no tokens are missing, refusing to guess")
     inputs = tokenizer(
         list(pairs),
         padding=False,

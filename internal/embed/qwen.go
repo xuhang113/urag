@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // QueryInstruct 是查询侧嵌入前缀。Query: 后面没有空格。
@@ -42,8 +41,9 @@ type qwenEmbedder struct {
 }
 
 // NewQwen 只从 dir 读取本地 Qwen 嵌入权重。
+// dir 可以是快照目录，也可以是 Hugging Face 缓存根目录；后者只用 refs/main 指向的快照。
 // 目录不存在、模型名不是 Qwen/Qwen3-Embedding-4B、meta.Dim 或 config 的 hidden_size 不是 2560、
-// 或缺少权重文件时返回错误。不访问网络，不下载，也不改维度。
+// 权重或分词器缺失时返回错误。不访问网络，不下载，也不改维度。
 // 文档侧的 Embed 按调用方传入的文本编码，不追加 QueryInstruct。
 // 查询由调用方先用 QueryText 拼好再交给 Embed。
 // 真正的前向发生在 Embed：每个批次启动一次本机 Python，子进程退出后才释放模型闸。
@@ -77,17 +77,24 @@ func NewQwenCommand(dir string, meta ModelMeta, argv []string) (Embedder, error)
 	if !info.IsDir() {
 		return nil, fmt.Errorf("embed: qwen weights path %q is not a directory", dir)
 	}
-	hidden, err := readHiddenSize(abs)
+	snap, err := ResolveSnapshot(abs, "embed: qwen")
+	if err != nil {
+		return nil, err
+	}
+	hidden, err := readHiddenSize(snap)
 	if err != nil {
 		return nil, err
 	}
 	if hidden != qwenDim {
 		return nil, fmt.Errorf("embed: qwen hidden size %d, want %d, refusing to change dimension", hidden, qwenDim)
 	}
-	if _, err := findWeightFile(abs); err != nil {
+	if err := WeightsReady(snap, "embed: qwen"); err != nil {
 		return nil, err
 	}
-	return qwenEmbedder{dir: abs, argv: append([]string(nil), argv...)}, nil
+	if err := TokenizerReady(snap, "embed: qwen"); err != nil {
+		return nil, err
+	}
+	return qwenEmbedder{dir: snap, argv: append([]string(nil), argv...)}, nil
 }
 
 func (q qwenEmbedder) Dim() int { return qwenDim }
@@ -173,21 +180,4 @@ func readHiddenSize(dir string) (int, error) {
 		return 0, fmt.Errorf("embed: qwen config in %q has no hidden size, refusing to download", dir)
 	}
 	return cfg.HiddenSize, nil
-}
-
-func findWeightFile(dir string) (string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := strings.ToLower(entry.Name())
-		if strings.HasSuffix(name, ".safetensors") || strings.HasSuffix(name, ".gguf") || name == "pytorch_model.bin" {
-			return filepath.Join(dir, entry.Name()), nil
-		}
-	}
-	return "", fmt.Errorf("embed: qwen weight file missing in %q, refusing to download", dir)
 }

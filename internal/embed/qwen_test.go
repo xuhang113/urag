@@ -196,9 +196,105 @@ func qwenMeta() embed.ModelMeta {
 func writeQwenLayout(t *testing.T, hidden int) string {
 	t.Helper()
 	dir := t.TempDir()
+	writeQwenFiles(t, dir, hidden)
+	return dir
+}
+
+func writeQwenFiles(t *testing.T, dir string, hidden int) {
+	t.Helper()
 	writeFile(t, filepath.Join(dir, "config.json"), fmt.Sprintf("{\"hidden_size\":%d}\n", hidden))
 	writeFile(t, filepath.Join(dir, "model.safetensors"), "fake")
-	return dir
+	writeFile(t, filepath.Join(dir, "tokenizer.json"), "{}")
+}
+
+func TestNewQwenResolvesCacheSnapshot(t *testing.T) {
+	root := t.TempDir()
+	const hash = "abc123snapshot"
+	snap := filepath.Join(root, "snapshots", hash)
+	if err := os.MkdirAll(filepath.Join(root, "blobs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(snap, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	blob := filepath.Join(root, "blobs", "weight")
+	writeFile(t, blob, "fake")
+	writeFile(t, filepath.Join(snap, "config.json"), "{\"hidden_size\":2560}\n")
+	writeFile(t, filepath.Join(snap, "tokenizer.json"), "{}")
+	if err := os.Symlink(blob, filepath.Join(snap, "model.safetensors")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "refs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "refs", "main"), hash+"\n")
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "model_dir.txt")
+	script := writeFile(t, filepath.Join(dir, "fake.py"), fakeModelDirScript)
+	emb, err := embed.NewQwenCommand(root, qwenMeta(), []string{pythonBin(t), script, logPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := emb.Embed(context.Background(), []string{"alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.Abs(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("model dir %q, want snapshot %q", got, want)
+	}
+}
+
+func TestNewQwenRejectsDanglingWeight(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.json"), "{\"hidden_size\":2560}\n")
+	writeFile(t, filepath.Join(dir, "tokenizer.json"), "{}")
+	if err := os.Symlink(filepath.Join(dir, "missing-blob"), filepath.Join(dir, "model.safetensors")); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "ran")
+	_, err := embed.NewQwenCommand(dir, qwenMeta(), []string{pythonBin(t), writeFakeTouch(t, marker)})
+	if err == nil {
+		t.Fatal("dangling weight symlink should fail")
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatal("command ran for a dangling weight")
+	}
+}
+
+func TestNewQwenRejectsIncompleteShards(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.json"), "{\"hidden_size\":2560}\n")
+	writeFile(t, filepath.Join(dir, "tokenizer.json"), "{}")
+	writeFile(t, filepath.Join(dir, "model-00001-of-00002.safetensors"), "fake")
+	writeFile(t, filepath.Join(dir, "model.safetensors.index.json"), `{
+		"weight_map": {
+			"a": "model-00001-of-00002.safetensors",
+			"b": "model-00002-of-00002.safetensors"
+		}
+	}`)
+	_, err := embed.NewQwen(dir, qwenMeta())
+	if err == nil || !strings.Contains(err.Error(), "model-00002-of-00002.safetensors") {
+		t.Fatal(err)
+	}
+}
+
+func TestNewQwenRejects06BCacheRoot(t *testing.T) {
+	root := filepath.Join(os.Getenv("HOME"), ".cache", "huggingface", "hub", "models--Qwen--Qwen3-Embedding-0.6B")
+	if _, err := os.Stat(filepath.Join(root, "refs", "main")); err != nil {
+		t.Skip("local Qwen3-Embedding-0.6B cache is absent")
+	}
+	_, err := embed.NewQwen(root, qwenMeta())
+	if err == nil || !strings.Contains(err.Error(), "1024") {
+		t.Fatal(err)
+	}
 }
 
 func writeFile(t *testing.T, path, body string) string {
@@ -255,6 +351,15 @@ func embedding06BDir() string {
 	}
 	return ""
 }
+
+const fakeModelDirScript = `
+import json, sys
+req = json.load(sys.stdin)
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write(req["model_dir"])
+dim = int(req["dim"])
+json.dump({"vectors": [[0.0] * dim]}, sys.stdout)
+`
 
 const fakeEmbedScript = `
 import json, sys

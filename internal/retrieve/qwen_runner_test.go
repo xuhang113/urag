@@ -225,7 +225,67 @@ func writeRerankLayout(t *testing.T, hidden int) string {
 	dir := t.TempDir()
 	writeText(t, filepath.Join(dir, "config.json"), fmt.Sprintf("{\"hidden_size\":%d}\n", hidden))
 	writeText(t, filepath.Join(dir, "model.safetensors"), "fake")
+	writeText(t, filepath.Join(dir, "tokenizer.json"), "{}")
 	return dir
+}
+
+func TestNewQwenRerankerResolvesCacheSnapshot(t *testing.T) {
+	root := t.TempDir()
+	const hash = "reranksnap"
+	snap := filepath.Join(root, "snapshots", hash)
+	if err := os.MkdirAll(snap, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeText(t, filepath.Join(snap, "config.json"), "{\"hidden_size\":2560}\n")
+	writeText(t, filepath.Join(snap, "model.safetensors"), "fake")
+	writeText(t, filepath.Join(snap, "tokenizer.json"), "{}")
+	if err := os.MkdirAll(filepath.Join(root, "refs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeText(t, filepath.Join(root, "refs", "main"), hash)
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "model_dir.txt")
+	script := writeText(t, filepath.Join(dir, "fake.py"), fakeRerankDirScript)
+	rr, err := retrieve.NewQwenRerankerCommand(root, []string{pythonBin(t), script, logPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scores, err := rr.Score(context.Background(), embed.QueryText("q"), []string{"passage"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scores) != 1 || scores[0] != 0.5 {
+		t.Fatalf("scores %v", scores)
+	}
+	got, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.Abs(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("model dir %q, want snapshot %q", got, want)
+	}
+}
+
+func TestNewQwenRerankerRejectsDanglingWeight(t *testing.T) {
+	dir := t.TempDir()
+	writeText(t, filepath.Join(dir, "config.json"), "{\"hidden_size\":2560}\n")
+	writeText(t, filepath.Join(dir, "tokenizer.json"), "{}")
+	if err := os.Symlink(filepath.Join(dir, "missing-blob"), filepath.Join(dir, "model.safetensors")); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "ran")
+	_, err := retrieve.NewQwenRerankerCommand(dir, []string{pythonBin(t), writeTouchScript(t, marker)})
+	if err == nil {
+		t.Fatal("dangling weight symlink should fail")
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatal("command ran for a dangling weight")
+	}
 }
 
 func writeText(t *testing.T, path, body string) string {
@@ -264,6 +324,14 @@ func waitLog(t *testing.T, path, needle string, limit time.Duration) bool {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+const fakeRerankDirScript = `
+import json, sys
+req = json.load(sys.stdin)
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write(req["model_dir"])
+json.dump({"scores": [0.5] * len(req["passages"])}, sys.stdout)
+`
 
 const fakeRerankScript = `
 import json, sys

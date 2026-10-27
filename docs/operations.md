@@ -64,9 +64,9 @@ go run ./cmd/urag crawl seeds.txt
 
 ## 本地前向
 
-`embed.NewQwen` 只读本机目录里的 `Qwen/Qwen3-Embedding-4B`。`config.json` 的 `hidden_size` 必须是 2560，并且目录里要有权重文件；否则返回错误，不下载，不降维，也不把 `Qwen3-Embedding-0.6B` 当成可用模型。建索引时只加载这个嵌入模型。每一批文本启动一次短生命周期的 `python3`：子进程读完这一批，在同一个 device 上做前向（本机有 MPS 就用 MPS，选中后不再换到 CPU），把 2560 维向量写回后退出。Go 不把整库向量留在内存里，一批超过 256 条会直接拒绝。文档按原文编码，不加指令。查询只使用已经拼好的 `embed.QueryText`。
+`embed.NewQwen` 只读本机目录里的 `Qwen/Qwen3-Embedding-4B`。`config.json` 的 `hidden_size` 必须是 2560，并且目录里要有完整权重和分词器；否则返回错误，不下载，不降维，也不把 `Qwen3-Embedding-0.6B` 当成可用模型。`URAG_EMBED_MODEL_DIR` 可以是快照目录，也可以是 Hugging Face 缓存根目录 `models--Qwen--Qwen3-Embedding-4B`。程序只打开本机 `refs/main` 指向的快照；断掉的符号链接、缺分片或没有分词器都直接失败，不补下载。建索引时只加载这个嵌入模型。每一批文本启动一次短生命周期的 `python3`：子进程读完这一批，在同一个 device 上做前向（本机有 MPS 就用 MPS，选中后不再换到 CPU），把 2560 维向量写回后退出。Go 不把整库向量留在内存里，一批超过 256 条会直接拒绝。文档按原文编码，不加指令。查询只使用已经拼好的 `embed.QueryText`。
 
-重排模型是 `Qwen/Qwen3-Reranker-4B`，由 `NewQwenReranker` 另行加载。它只给调用方送来的段落打分，不查库，不生成答案。嵌入子进程退出之后，重排子进程才可以启动，两个模型不会同时常驻。指令与嵌入相同：`Instruct: Given a web search query, retrieve relevant passages that answer the query`，`Query:` 后面直接接问题。本机没有重排模型卡，程序不联网打开模型页。前向使用本机已有的 Python，还需要该环境里的 `torch` 和 `transformers`；程序不替你安装，也不下载权重。
+重排模型是 `Qwen/Qwen3-Reranker-4B`，由 `NewQwenReranker` 另行加载。它的目录同样可以是缓存根目录 `models--Qwen--Qwen3-Reranker-4B`。它只给调用方送来的段落打分，不查库，不生成答案。嵌入子进程退出之后，重排子进程才可以启动，两个模型不会同时常驻。指令与嵌入相同：`Instruct: Given a web search query, retrieve relevant passages that answer the query`，`Query:` 后面直接接问题。本机没有重排模型卡，程序不联网打开模型页。前向使用本机已有的 Python，还需要该环境里的 `torch` 和 `transformers`；程序不替你安装，也不下载权重。
 
 ## 验收页
 
