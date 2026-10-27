@@ -16,6 +16,7 @@ import (
 	"github.com/xuhang113/urag/internal/catalog"
 	"github.com/xuhang113/urag/internal/chunk"
 	"github.com/xuhang113/urag/internal/clean"
+	"github.com/xuhang113/urag/internal/embed"
 	"github.com/xuhang113/urag/internal/index"
 	"github.com/xuhang113/urag/internal/model"
 )
@@ -217,10 +218,7 @@ func (p *Pipeline) ingestFound(ctx context.Context, rec *jobRecord, cleaner clea
 }
 
 func (p *Pipeline) writeVectors(ctx context.Context, col model.CollectionID, docID int64, kids []catalog.Child) error {
-	batch := p.cfg.Limits.EmbedBatch
-	if batch <= 0 {
-		batch = 16
-	}
+	batch := forwardBatch(p.cfg.Limits.EmbedBatch)
 	for start := 0; start < len(kids); start += batch {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -260,6 +258,16 @@ func (p *Pipeline) writeVectors(ctx context.Context, col model.CollectionID, doc
 		}
 	}
 	return nil
+}
+
+func forwardBatch(n int) int {
+	if n <= 0 {
+		n = DefaultEmbedBatch
+	}
+	if n > embed.MaxForwardBatch {
+		n = embed.MaxForwardBatch
+	}
+	return n
 }
 
 func sectionGroups(sections []chunk.Section) []catalog.ParentWithChildren {

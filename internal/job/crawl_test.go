@@ -262,6 +262,18 @@ func TestCrawlCheckpointFileSkipsCompletedSources(t *testing.T) {
 	}
 }
 
+func TestForwardBatchDefaultAndCap(t *testing.T) {
+	if got := forwardBatch(0); got != 64 || DefaultEmbedBatch != 64 {
+		t.Fatalf("default %d", got)
+	}
+	if forwardBatch(-3) != 64 || forwardBatch(64) != 64 {
+		t.Fatalf("batch %d %d", forwardBatch(-3), forwardBatch(64))
+	}
+	if forwardBatch(embed.MaxForwardBatch+8) != embed.MaxForwardBatch {
+		t.Fatal(forwardBatch(embed.MaxForwardBatch + 8))
+	}
+}
+
 func TestCrawlFileDoesNotBufferOriginal(t *testing.T) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {

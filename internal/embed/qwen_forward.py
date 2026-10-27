@@ -1,4 +1,4 @@
-"""One Qwen3-Embedding-4B batch, then exit.
+"""Keep Qwen3-Embedding-4B loaded and embed one batch per stdin line.
 
 The caller passes texts unchanged. Document text has no instruction.
 Query text is already embed.QueryText:
@@ -6,6 +6,12 @@ Instruct: Given a web search query, retrieve relevant passages that answer the q
 Query: is followed immediately by the question, with no space.
 This process does not add that prefix, does not download weights, and does not
 write the original text anywhere.
+
+Each stdin line is one JSON object:
+{"task":"embed","model_dir":"...","dim":2560,"texts":["..."]}
+Each stdout line is {"vectors":[[...]]}.
+The model loads on the first batch and stays on the device chosen once.
+Stdin EOF exits. A failed forward exits instead of moving the batch to CPU.
 """
 
 import json
@@ -65,13 +71,7 @@ def last_token_pool(last_hidden_states, attention_mask):
     ]
 
 
-def embed_batch(req):
-    model_dir = req["model_dir"]
-    texts = req["texts"]
-    if not isinstance(texts, list) or not texts:
-        raise SystemExit("empty embed batch")
-    if int(req["dim"]) != HIDDEN:
-        raise SystemExit("dim is not 2560, refusing to change dimension")
+def load_model(model_dir):
     require_hidden(model_dir)
 
     import torch
@@ -91,6 +91,12 @@ def embed_batch(req):
     model.to(device)
     model.eval()
     model.config.use_cache = False
+    return model, tokenizer, device
+
+
+def embed_texts(model, tokenizer, device, texts):
+    import torch
+
     batch = tokenizer(
         list(texts),
         padding=True,
@@ -109,19 +115,49 @@ def embed_batch(req):
             )
         # float() stays on the chosen device. It is not a move onto CPU.
         pooled = torch.nn.functional.normalize(pooled.float(), p=2, dim=1)
-        vectors = pooled.tolist()
-    return {"vectors": vectors}
+        return pooled.tolist()
+
+
+def write_vectors(real_stdout, vectors):
+    real_stdout.write(json.dumps({"vectors": vectors}))
+    real_stdout.write("\n")
+    real_stdout.flush()
 
 
 def main():
     real_stdout = sys.stdout
     sys.stdout = sys.stderr
+    model = None
+    tokenizer = None
+    device = None
+    loaded_dir = None
     try:
-        req = json.load(sys.stdin)
-        if req.get("task") != "embed":
-            sys.stderr.write("qwen embed script rejects a non-embed task\n")
-            raise SystemExit(2)
-        result = embed_batch(req)
+        while True:
+            raw = sys.stdin.readline()
+            if raw == "":
+                break
+            line = raw.strip()
+            if not line:
+                continue
+            req = json.loads(line)
+            if req.get("task") != "embed":
+                sys.stderr.write("qwen embed script rejects a non-embed task\n")
+                raise SystemExit(2)
+            texts = req.get("texts")
+            if not isinstance(texts, list) or not texts:
+                raise SystemExit("empty embed batch")
+            if int(req.get("dim") or 0) != HIDDEN:
+                raise SystemExit("dim is not 2560, refusing to change dimension")
+            model_dir = req["model_dir"]
+            if model is None:
+                model, tokenizer, device = load_model(model_dir)
+                loaded_dir = model_dir
+            elif model_dir != loaded_dir:
+                raise SystemExit("model directory changed, refusing to reload")
+            vectors = embed_texts(model, tokenizer, device, texts)
+            if len(vectors) != len(texts):
+                raise SystemExit("vector count mismatch")
+            write_vectors(real_stdout, vectors)
     except SystemExit:
         raise
     except Exception as exc:
@@ -129,9 +165,6 @@ def main():
         raise SystemExit(1) from exc
     finally:
         sys.stdout = real_stdout
-    json.dump(result, real_stdout)
-    real_stdout.write("\n")
-    real_stdout.flush()
 
 
 if __name__ == "__main__":

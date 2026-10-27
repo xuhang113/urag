@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 const maxForwardBytes = 64 << 20
@@ -139,11 +140,14 @@ func forwardErr(err error, stderr string) error {
 }
 
 type tailBuf struct {
+	mu  sync.Mutex
 	buf bytes.Buffer
 	max int
 }
 
 func (t *tailBuf) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if t.buf.Len() < t.max {
 		room := t.max - t.buf.Len()
 		chunk := p
@@ -155,7 +159,11 @@ func (t *tailBuf) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (t *tailBuf) String() string { return t.buf.String() }
+func (t *tailBuf) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.buf.String()
+}
 
 func forwardEnv() []string {
 	skip := map[string]struct{}{
@@ -189,6 +197,7 @@ func forwardEnv() []string {
 		"HF_HUB_DISABLE_TELEMETRY=1",
 		"HF_HUB_DISABLE_PROGRESS_BARS=1",
 		"TOKENIZERS_PARALLELISM=false",
+		"PYTHONUNBUFFERED=1",
 		"PYTHONIOENCODING=utf-8",
 	)
 	return out

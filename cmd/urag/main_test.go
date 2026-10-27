@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -49,6 +50,60 @@ func TestCrawlExitsWithoutDSN(t *testing.T) {
 	err := run([]string{"crawl", path})
 	if err == nil || !strings.Contains(err.Error(), "URAG_MYSQL_DSN") {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestEmbedBatchDefaultIs64(t *testing.T) {
+	for _, key := range []string{
+		"URAG_RETRY_MAX",
+		"URAG_VECTOR_WEIGHT",
+		"URAG_KEYWORD_WEIGHT",
+		"URAG_CHUNK_MAX_LEN",
+		"URAG_CHUNK_OVERLAP",
+		"URAG_CLEAN_CONCURRENCY",
+		"URAG_EMBED_BATCH_SIZE",
+		"URAG_EMBED_CONCURRENCY",
+		"URAG_UPLOAD_CONCURRENCY",
+		"URAG_INLINE_JOBS",
+	} {
+		t.Setenv(key, "")
+	}
+	cfg, err := configFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Limits.EmbedBatch != 64 {
+		t.Fatalf("batch %d", cfg.Limits.EmbedBatch)
+	}
+	t.Setenv("URAG_EMBED_BATCH_SIZE", "32")
+	cfg, err = configFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Limits.EmbedBatch != 32 {
+		t.Fatalf("batch %d", cfg.Limits.EmbedBatch)
+	}
+}
+
+func TestCrawlKeepsOneEmbedProcess(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("caller")
+	}
+	body, err := os.ReadFile(filepath.Join(filepath.Dir(file), "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, frag := range []string{"Start(ctx)", "starter.Close()", "NewOverlapReranker"} {
+		if !strings.Contains(text, frag) {
+			t.Fatalf("missing %s", frag)
+		}
+	}
+	for _, frag := range []string{"NewQwenReranker", "storage.Put", ".Put("} {
+		if strings.Contains(text, frag) {
+			t.Fatalf("contains %s", frag)
+		}
 	}
 }
 

@@ -8,8 +8,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/xuhang113/urag/internal/embed"
 )
@@ -160,10 +164,13 @@ func TestQwenForwardScriptIsLocal(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(body)
-	for _, frag := range []string{"local_files_only=True", "hidden_size", "mps", "2560"} {
+	for _, frag := range []string{"local_files_only=True", "hidden_size", "mps", "float16", "2560", "sys.stdin.readline", "if model is None"} {
 		if !strings.Contains(text, frag) {
 			t.Fatalf("script missing %s", frag)
 		}
+	}
+	if strings.Count(text, "from_pretrained") != 2 {
+		t.Fatalf("from_pretrained count %d", strings.Count(text, "from_pretrained"))
 	}
 	for _, frag := range []string{"snapshot_download", "huggingface.co", "Qwen3-Embedding-0.6B", `to("cpu")`, "to('cpu')", ".generate("} {
 		if strings.Contains(text, frag) {
@@ -186,6 +193,248 @@ func TestLocalEmbedding06BIsNotSuccess(t *testing.T) {
 	_, err := embed.NewQwen(dir, qwenMeta())
 	if err == nil || !strings.Contains(err.Error(), "1024") {
 		t.Fatal(err)
+	}
+}
+
+func TestQwenResidentReusesOneProcess(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "batches.jsonl")
+	script := writeFile(t, filepath.Join(dir, "fake.py"), fakeResidentScript)
+	emb, err := embed.NewQwenCommand(writeQwenLayout(t, 2560), qwenMeta(), []string{pythonBin(t), script, logPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := emb.(interface {
+		Start(context.Context) error
+		Close() error
+	})
+	ctx := context.Background()
+	if err := session.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	if err := session.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	body := waitLogContains(t, logPath, "start ")
+	pid := startPID(t, body)
+	if !processAlive(pid) {
+		t.Fatal("forward process exited after start")
+	}
+	if strings.Contains(body, "exit") {
+		t.Fatalf("process exited early: %s", body)
+	}
+	empty, err := emb.Embed(ctx, nil)
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("empty embed: %v %v", empty, err)
+	}
+	large := make([]string, embed.MaxForwardBatch+1)
+	if _, err := emb.Embed(ctx, large); err == nil {
+		t.Fatal("oversized batch should fail")
+	}
+
+	first, err := emb.Embed(ctx, []string{"alpha", "beta"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertBatchVector(t, first[0], 2560, 5, 1)
+	assertBatchVector(t, first[1], 2560, 4, 2)
+	query := embed.QueryText("lantern")
+	second, err := emb.Embed(ctx, []string{query})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertBatchVector(t, second[0], 2560, float32(len(query)), 1)
+	if !processAlive(pid) {
+		t.Fatal("forward process exited between batches")
+	}
+
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if strings.Count(text, "start ") != 1 || strings.Contains(text, "exit") {
+		t.Fatalf("log before close:\n%s", text)
+	}
+	lines := strings.Split(strings.TrimSpace(text), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("lines %q", text)
+	}
+	var gotFirst []string
+	if err := json.Unmarshal([]byte(lines[1]), &gotFirst); err != nil {
+		t.Fatal(err)
+	}
+	if len(gotFirst) != 2 || gotFirst[0] != "alpha" || gotFirst[1] != "beta" || strings.Contains(gotFirst[0], "Instruct:") {
+		t.Fatalf("first batch %v", gotFirst)
+	}
+	var gotSecond []string
+	if err := json.Unmarshal([]byte(lines[2]), &gotSecond); err != nil {
+		t.Fatal(err)
+	}
+	if len(gotSecond) != 1 || gotSecond[0] != query || strings.Count(gotSecond[0], "Instruct:") != 1 {
+		t.Fatalf("query batch %q", gotSecond)
+	}
+
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := emb.Embed(ctx, []string{"again"}); err == nil {
+		t.Fatal("embed after close should fail")
+	}
+	if err := session.Start(ctx); err == nil {
+		t.Fatal("start after close should fail")
+	}
+	raw, err = os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text = string(raw)
+	if strings.Count(text, "start ") != 1 || !strings.Contains(text, "exit") {
+		t.Fatalf("log after close:\n%s", text)
+	}
+	if processAlive(pid) {
+		t.Fatal("forward process still alive after close")
+	}
+}
+
+func TestQwenResidentClosesOnCancel(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "order.log")
+	hold := filepath.Join(dir, "hold")
+	if err := os.WriteFile(hold, []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := writeFile(t, filepath.Join(dir, "fake.py"), fakeResidentHoldScript)
+	emb, err := embed.NewQwenCommand(writeQwenLayout(t, 2560), qwenMeta(), []string{pythonBin(t), script, logPath, hold})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := emb.(interface {
+		Start(context.Context) error
+		Close() error
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := session.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	waitLogContains(t, logPath, "start ")
+	pid := startPID(t, mustRead(t, logPath))
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := emb.Embed(ctx, []string{"alpha"})
+		errCh <- err
+	}()
+	waitLogContains(t, logPath, "got")
+	cancel()
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("canceled embed returned nil")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("embed did not return after cancel")
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if processAlive(pid) {
+		t.Fatal("forward process still alive after cancel")
+	}
+	if strings.Count(mustRead(t, logPath), "start ") != 1 {
+		t.Fatalf("reloaded after cancel:\n%s", mustRead(t, logPath))
+	}
+}
+
+func TestQwenResidentDoesNotRestartAfterExit(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "crash.log")
+	script := writeFile(t, filepath.Join(dir, "fake.py"), fakeResidentCrashScript)
+	emb, err := embed.NewQwenCommand(writeQwenLayout(t, 2560), qwenMeta(), []string{pythonBin(t), script, logPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := emb.(interface {
+		Start(context.Context) error
+		Close() error
+	})
+	ctx := context.Background()
+	if err := session.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	waitLogContains(t, logPath, "start ")
+	if _, err := emb.Embed(ctx, []string{"alpha"}); err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatal(err)
+	}
+	if _, err := emb.Embed(ctx, []string{"beta"}); err == nil {
+		t.Fatal("second embed restarted the process")
+	}
+	if strings.Count(mustRead(t, logPath), "start ") != 1 {
+		t.Fatalf("reloaded:\n%s", mustRead(t, logPath))
+	}
+}
+
+func TestQwenResidentBlocksRerank(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "gate.log")
+	script := writeFile(t, filepath.Join(dir, "fake.py"), fakeResidentScript)
+	emb, err := embed.NewQwenCommand(writeQwenLayout(t, 2560), qwenMeta(), []string{pythonBin(t), script, logPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := emb.(interface {
+		Start(context.Context) error
+		Close() error
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := session.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	waitLogContains(t, logPath, "start ")
+
+	blocked := make(chan struct{})
+	var once sync.Once
+	embed.SetLocalWaitNotifier(func(waiting, held string) {
+		if waiting == embed.KindRerank && held == embed.KindEmbed {
+			once.Do(func() { close(blocked) })
+		}
+	})
+	t.Cleanup(func() { embed.SetLocalWaitNotifier(nil) })
+
+	rerankScript := writeFile(t, filepath.Join(dir, "rerank.py"), fakeResidentRerankScript)
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := embed.RunLocalProcess(ctx, embed.KindRerank, []string{pythonBin(t), rerankScript, logPath}, []byte(`{"task":"rerank"}`))
+		errCh <- err
+	}()
+	select {
+	case <-blocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("rerank was not blocked on the embed process")
+	}
+	if strings.Contains(mustRead(t, logPath), "rerank-start") {
+		t.Fatal("rerank started while embed was resident")
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if !strings.Contains(mustRead(t, logPath), "rerank-start") {
+		t.Fatal("rerank did not start after embed closed")
 	}
 }
 
@@ -319,6 +568,56 @@ func pythonBin(t *testing.T) string {
 	return path
 }
 
+func waitLogContains(t *testing.T, path, needle string) string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var body string
+	for {
+		raw, err := os.ReadFile(path)
+		if err == nil {
+			body = string(raw)
+			if strings.Contains(body, needle) {
+				return body
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("log missing %s: %q", needle, body)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func mustRead(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func startPID(t *testing.T, body string) int {
+	t.Helper()
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "start ") {
+			n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "start ")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return n
+		}
+	}
+	t.Fatalf("no start pid in %q", body)
+	return 0
+}
+
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	return syscall.Kill(pid, 0) == nil
+}
+
 func assertBatchVector(t *testing.T, vec embed.Vector, dim int, first, second float32) {
 	t.Helper()
 	if len(vec) != dim {
@@ -359,6 +658,73 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
     handle.write(req["model_dir"])
 dim = int(req["dim"])
 json.dump({"vectors": [[0.0] * dim]}, sys.stdout)
+`
+
+const fakeResidentScript = `
+import json, os, sys
+log = sys.argv[1]
+with open(log, "a", encoding="utf-8") as handle:
+    handle.write("start %d\n" % os.getpid())
+while True:
+    raw = sys.stdin.readline()
+    if raw == "":
+        break
+    line = raw.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(req["texts"], ensure_ascii=False) + "\n")
+    dim = int(req["dim"])
+    vectors = []
+    for index, text in enumerate(req["texts"]):
+        row = [0.0] * dim
+        row[0] = float(len(text))
+        row[1] = float(index + 1)
+        vectors.append(row)
+    json.dump({"vectors": vectors}, sys.stdout)
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+with open(log, "a", encoding="utf-8") as handle:
+    handle.write("exit\n")
+`
+
+const fakeResidentHoldScript = `
+import json, os, sys, time
+log, hold = sys.argv[1], sys.argv[2]
+with open(log, "a", encoding="utf-8") as handle:
+    handle.write("start %d\n" % os.getpid())
+raw = sys.stdin.readline()
+with open(log, "a", encoding="utf-8") as handle:
+    handle.write("got\n")
+while os.path.exists(hold):
+    time.sleep(0.02)
+req = json.loads(raw)
+dim = int(req["dim"])
+row = [0.0] * dim
+row[0] = 1.0
+json.dump({"vectors": [row]}, sys.stdout)
+sys.stdout.write("\n")
+sys.stdout.flush()
+`
+
+const fakeResidentCrashScript = `
+import os, sys
+log = sys.argv[1]
+with open(log, "a", encoding="utf-8") as handle:
+    handle.write("start %d\n" % os.getpid())
+sys.stdin.readline()
+sys.stderr.write("boom\n")
+sys.stderr.flush()
+raise SystemExit(1)
+`
+
+const fakeResidentRerankScript = `
+import json, sys
+json.load(sys.stdin)
+with open(sys.argv[1], "a", encoding="utf-8") as handle:
+    handle.write("rerank-start\n")
+json.dump({"scores": [1]}, sys.stdout)
 `
 
 const fakeEmbedScript = `

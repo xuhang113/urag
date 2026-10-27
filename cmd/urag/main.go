@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/xuhang113/urag/internal/acquire"
@@ -70,6 +72,8 @@ func crawl(args []string) error {
 	if len(args) != 1 {
 		return errors.New("urag: crawl 需要一个种子文件")
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	seeds, err := readSeeds(args[0])
 	if err != nil {
 		return err
@@ -98,7 +102,6 @@ func crawl(args []string) error {
 		return err
 	}
 	defer db.Close()
-	ctx := context.Background()
 	if err := db.ApplySchema(ctx); err != nil {
 		return err
 	}
@@ -106,6 +109,19 @@ func crawl(args []string) error {
 	if err != nil {
 		return err
 	}
+	// 整次收录只启动一个嵌入进程。种子分批和失败重试都复用它。
+	// 结束、失败或取消时关掉。重排仍用重叠重排，不加载重排模型。
+	starter, ok := emb.(interface {
+		Start(context.Context) error
+		Close() error
+	})
+	if !ok {
+		return errors.New("urag: 嵌入进程无法常驻")
+	}
+	if err := starter.Start(ctx); err != nil {
+		return err
+	}
+	defer func() { _ = starter.Close() }()
 	reg, err := index.NewDisk(filepath.Join(cfg.DataDir, "vectors"), qwenMeta)
 	if err != nil {
 		return err
@@ -134,6 +150,7 @@ func crawl(args []string) error {
 	}
 	col := model.CollectionID(envOr("URAG_COLLECTION", "public"))
 	// 每批列完就入库并写下断点。整份种子一起列完才入库时，后面的地址会挡住前面的篇数。
+	// 原文不写入对象存储。嵌入进程在上面已经启动，这里不再加载模型。
 	for _, batch := range splitSeedBatches(seeds, crawlSeedBatch) {
 		result, err := pipeline.SubmitCrawl(ctx, job.CrawlInput{
 			CollectionID: col,
@@ -260,7 +277,7 @@ func configFromEnv() (job.Config, error) {
 	if err != nil {
 		return job.Config{}, err
 	}
-	embedBatch, err := envInt("URAG_EMBED_BATCH_SIZE", 16)
+	embedBatch, err := envInt("URAG_EMBED_BATCH_SIZE", job.DefaultEmbedBatch)
 	if err != nil {
 		return job.Config{}, err
 	}
@@ -325,7 +342,7 @@ func openEmbedder() (embed.Embedder, error) {
 	if endpoint == "" {
 		return embed.NewFixture(64), nil
 	}
-	batch, err := envInt("URAG_EMBED_BATCH_SIZE", 16)
+	batch, err := envInt("URAG_EMBED_BATCH_SIZE", job.DefaultEmbedBatch)
 	if err != nil {
 		return nil, err
 	}

@@ -128,6 +128,10 @@ type Limits struct {
 	EmbedConcurrency int
 }
 
+// DefaultEmbedBatch 是未设置 URAG_EMBED_BATCH_SIZE 时的条数。
+// 比逐批重载模型时用的 16 大，仍不超过 embed.MaxForwardBatch，避免把整库放进内存。
+const DefaultEmbedBatch = 64
+
 // Config 是进程组装参数。
 // Storage 只取 local 或 s3。FixturePath 是召回夹具路径。
 // Inline 为 true 时，清洗和建索引在入队方法返回前完成，成功状态为 succeeded。

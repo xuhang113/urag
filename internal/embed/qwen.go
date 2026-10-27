@@ -4,10 +4,12 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 // QueryInstruct 是查询侧嵌入前缀。Query: 后面没有空格。
@@ -38,6 +40,13 @@ var qwenForwardScript string
 type qwenEmbedder struct {
 	dir  string
 	argv []string
+
+	mu       sync.Mutex
+	proc     *residentProc
+	opened   bool
+	starting bool
+	stopped  bool
+	held     bool
 }
 
 // NewQwen 只从 dir 读取本地 Qwen 嵌入权重。
@@ -46,7 +55,8 @@ type qwenEmbedder struct {
 // 权重或分词器缺失时返回错误。不访问网络，不下载，也不改维度。
 // 文档侧的 Embed 按调用方传入的文本编码，不追加 QueryInstruct。
 // 查询由调用方先用 QueryText 拼好再交给 Embed。
-// 真正的前向发生在 Embed：每个批次启动一次本机 Python，子进程退出后才释放模型闸。
+// 没有 Start 时，Embed 每一批启动一次短生命周期的本机 Python。
+// Start 之后，同一次收录里的 Embed 复用这一个进程，直到 Close。
 func NewQwen(dir string, meta ModelMeta) (Embedder, error) {
 	return NewQwenCommand(dir, meta, nil)
 }
@@ -94,12 +104,12 @@ func NewQwenCommand(dir string, meta ModelMeta, argv []string) (Embedder, error)
 	if err := TokenizerReady(snap, "embed: qwen"); err != nil {
 		return nil, err
 	}
-	return qwenEmbedder{dir: snap, argv: append([]string(nil), argv...)}, nil
+	return &qwenEmbedder{dir: snap, argv: append([]string(nil), argv...)}, nil
 }
 
-func (q qwenEmbedder) Dim() int { return qwenDim }
+func (q *qwenEmbedder) Dim() int { return qwenDim }
 
-func (q qwenEmbedder) Embed(ctx context.Context, texts []string) ([]Vector, error) {
+func (q *qwenEmbedder) Embed(ctx context.Context, texts []string) ([]Vector, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -109,11 +119,49 @@ func (q qwenEmbedder) Embed(ctx context.Context, texts []string) ([]Vector, erro
 	if len(texts) > MaxForwardBatch {
 		return nil, fmt.Errorf("embed: batch %d exceeds %d, refusing to keep that many vectors in memory", len(texts), MaxForwardBatch)
 	}
+	q.mu.Lock()
+	stopped := q.stopped
+	opened := q.opened
+	proc := q.proc
+	q.mu.Unlock()
+	if stopped {
+		return nil, errors.New("embed: forward process is closed")
+	}
+	payload, err := q.payload(texts)
+	if err != nil {
+		return nil, err
+	}
+	if opened {
+		return q.embedResident(ctx, proc, payload, len(texts))
+	}
+	return q.embedOnce(ctx, payload, len(texts))
+}
+
+func (q *qwenEmbedder) embedOnce(ctx context.Context, payload []byte, n int) ([]Vector, error) {
 	argv, err := q.command()
 	if err != nil {
 		return nil, err
 	}
-	payload, err := json.Marshal(struct {
+	out, err := RunLocalProcess(ctx, KindEmbed, argv, payload)
+	if err != nil {
+		return nil, err
+	}
+	return parseVectors(out, n)
+}
+
+func (q *qwenEmbedder) embedResident(ctx context.Context, proc *residentProc, payload []byte, n int) ([]Vector, error) {
+	if proc == nil {
+		return nil, errors.New("embed: forward process is closed")
+	}
+	out, err := proc.roundTrip(ctx, payload)
+	if err != nil {
+		return nil, err
+	}
+	return parseVectors(out, n)
+}
+
+func (q *qwenEmbedder) payload(texts []string) ([]byte, error) {
+	return json.Marshal(struct {
 		Task     string   `json:"task"`
 		ModelDir string   `json:"model_dir"`
 		Dim      int      `json:"dim"`
@@ -124,21 +172,17 @@ func (q qwenEmbedder) Embed(ctx context.Context, texts []string) ([]Vector, erro
 		Dim:      qwenDim,
 		Texts:    texts,
 	})
-	if err != nil {
-		return nil, err
-	}
-	out, err := RunLocalProcess(ctx, KindEmbed, argv, payload)
-	if err != nil {
-		return nil, err
-	}
+}
+
+func parseVectors(out []byte, n int) ([]Vector, error) {
 	var parsed struct {
 		Vectors [][]float32 `json:"vectors"`
 	}
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		return nil, fmt.Errorf("embed: qwen forward output: %w", err)
 	}
-	if len(parsed.Vectors) != len(texts) {
-		return nil, fmt.Errorf("embed: qwen forward returned %d vectors for %d texts", len(parsed.Vectors), len(texts))
+	if len(parsed.Vectors) != n {
+		return nil, fmt.Errorf("embed: qwen forward returned %d vectors for %d texts", len(parsed.Vectors), n)
 	}
 	vecs := make([]Vector, len(parsed.Vectors))
 	for i, row := range parsed.Vectors {
@@ -150,7 +194,7 @@ func (q qwenEmbedder) Embed(ctx context.Context, texts []string) ([]Vector, erro
 	return vecs, nil
 }
 
-func (q qwenEmbedder) command() ([]string, error) {
+func (q *qwenEmbedder) command() ([]string, error) {
 	if len(q.argv) > 0 {
 		return q.argv, nil
 	}
