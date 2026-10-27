@@ -10,7 +10,17 @@ urag 把外部材料收成可检索的集合。一条材料按固定顺序走完
 4. 片段。默认按段落切分。段落切分尚未接通时，短文整篇成为一个片段，编号是 `documentID#0`，字节区间落在文档正文上。
 5. 向量。片段文本交给 `embed.Embedder`，再写入该集合自己的索引。评价夹具使用夹具里的文档编号，不用内容哈希替换。
 
-提问只打开请求里点名的集合。评价先按题目的 `collections` 调用 `Ask`，再用 `eval.RecallAtK` 和 `eval.MeanReciprocalRank` 汇总。
+提问只打开请求里点名的集合。评价先按题目的 `collections` 调用 `Ask`，再用 `eval.RecallAtK` 和 `eval.MeanReciprocalRank` 汇总。提问页仍走 `Retrieve` 和召回夹具。`RetrieveChildren` 还没有接到验收页。
+
+## 一期收录
+
+`urag crawl` 读取种子文件里的站点地图或目录页。对每个 `Found`，`Open` 的响应流直接进入清洗，原文不写入 `storage.Store`。台账只留下来源 URL 和清洗后的 UTF-8。
+
+台账有三张表：`source_document`、`parent_section`、`child_chunk`。先 `PutDocument`，再 `ReplaceSections`。`chunk_id` 用台账里已有的规则，由文档编号、井号和序号组成。
+
+篇数是清洗后 `Duplicate` 为 false，且至少有一个子块的来源。`catalog.CountIndexed` 数这些来源行。不支持的类型、下载失败和重复文档不计入。没有子块的文档不计入。
+
+嵌入文本用 `chunk.Passage`。向量按批写入该集合的磁盘索引。同一来源 URL 只有一行台账。`Job.Checkpoint` 的 `source_uris` 记下已经处理完的来源 URL。失败最多尝试 3 次，次数含第一次。取消不重试。
 
 ## 集合隔离
 
@@ -28,10 +38,10 @@ urag 把外部材料收成可检索的集合。一条材料按固定顺序走完
 
 `URAG_INLINE_JOBS` 或 `job.Config.Inline` 为 true 时，清洗和建索引在 `AcceptUpload` 或 `SubmitFetch` 返回前做完，成功时状态是 succeeded。否则任务异步执行，返回时状态是 queued 或 running。
 
-任务种类是 upload、fetch、eval。
+任务种类是 upload、fetch、crawl、eval。
 
 ## 断点与重试
 
 失败最多尝试 3 次，次数含第一次。`context.Canceled` 和校验和不符不重试。`Cancel` 之后状态变为 canceled，正在进行的步骤被取消，循环不再进入下一次。
 
-`Job.Checkpoint` 是 JSON，字段 `object_keys` 记下已经处理完的对象键。同一次任务再次执行时跳过这些键。抓取任务按条目推进，前面的对象已经记入断点后，后面的失败不会把前面的对象再清洗一遍。
+`Job.Checkpoint` 是 JSON。字段 `object_keys` 记下已经处理完的对象键。收录任务的 `source_uris` 记下已经处理完的来源 URL。同一次任务再次执行时跳过这些键。抓取任务按条目推进，前面的对象已经记入断点后，后面的失败不会把前面的对象再清洗一遍。

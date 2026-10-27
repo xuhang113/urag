@@ -1,9 +1,10 @@
-// Package job 编排上传、抓取、清洗、嵌入、检索和评价任务。
+// Package job 编排上传、抓取、收录、清洗、嵌入、检索和评价任务。
 // 接受上传时只把正文流式写入存储并入队。清洗和嵌入在任务执行时进行。
+// 收录任务不把原文写入对象存储，只把来源 URL 记入台账。
 // 本包不提供 HTTP 页面。
 //
-// 校验和不符不重试。任务取消后不再重试。其他失败最多尝试 3 次。
-// Checkpoint 记下已完成的对象键，恢复时跳过这些键。
+// 校验和不符不重试。任务取消后不再重试。其他失败最多尝试 3 次，次数含第一次。
+// Checkpoint 记下已完成的对象键；收录任务另外用 source_uris 记下已经处理完的来源 URL。
 package job
 
 import (
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/xuhang113/urag/internal/acquire"
+	"github.com/xuhang113/urag/internal/catalog"
 	"github.com/xuhang113/urag/internal/chunk"
 	"github.com/xuhang113/urag/internal/clean"
 	"github.com/xuhang113/urag/internal/embed"
@@ -44,6 +46,8 @@ const (
 	KindUpload = "upload"
 	// KindFetch 是抓取任务。
 	KindFetch = "fetch"
+	// KindCrawl 是公开收录任务。原文留在来源 URL，不写入对象存储。
+	KindCrawl = "crawl"
 	// KindEval 是评价任务。
 	KindEval = "eval"
 
@@ -72,7 +76,7 @@ type Progress struct {
 // State 只取 queued、running、succeeded、failed、canceled。
 // Kind 只取 upload、fetch、eval。
 // 校验和不符不增加后续重试。取消后 State 为 canceled，且不再重试。
-// Checkpoint 记下已完成的对象键，恢复时跳过这些键。
+// Checkpoint 记下已完成的对象键。收录任务的 source_uris 记下已经处理完的来源 URL。
 type Job struct {
 	ID           string          `json:"job_id"`
 	Kind         string          `json:"kind"`
@@ -141,8 +145,15 @@ type Config struct {
 	UploadConcurrency int
 }
 
+// VectorWriter 按批把子块向量写入磁盘索引。
+// 收录测试传入 index.NewDisk 的结果，并使用夹具嵌入，不加载本地权重。
+type VectorWriter interface {
+	UpsertRecords(ctx context.Context, recs []index.VectorRecord) error
+}
+
 // Deps 是管道使用的协作件。Store、Embedder、Registry、Cleaner 不能为空。
 // 缺任意一个时 New 返回错误，不会换成全局索引。
+// Catalog 与 Vectors 只给收录任务使用。上传和提问不要求它们。
 type Deps struct {
 	Store    storage.Store
 	Embedder embed.Embedder
@@ -150,6 +161,8 @@ type Deps struct {
 	Reranker retrieve.Reranker
 	Splitter chunk.Splitter
 	Cleaner  clean.Cleaner
+	Catalog  catalog.Store
+	Vectors  VectorWriter
 }
 
 // Pipeline 是上传、抓取、检索和评价的任务入口。
@@ -170,6 +183,7 @@ type jobRecord struct {
 	contentType string
 	sourceURI   string
 	fetch       *FetchInput
+	crawl       *CrawlInput
 	cancel      context.CancelFunc
 	done        chan struct{}
 	cleaned     map[model.ObjectKey]model.Document
@@ -177,6 +191,7 @@ type jobRecord struct {
 
 type objectCheckpoint struct {
 	ObjectKeys []string `json:"object_keys"`
+	SourceURIs []string `json:"source_uris,omitempty"`
 }
 
 // New 组装管道。不拨号、不打开存储、不读取夹具。
@@ -463,6 +478,8 @@ func (p *Pipeline) execute(ctx context.Context, rec *jobRecord) error {
 		return p.processKey(ctx, rec, model.ObjectKey(rec.Job.ObjectKey), rec.filename, "")
 	case KindFetch:
 		return p.executeFetch(ctx, rec)
+	case KindCrawl:
+		return p.executeCrawl(ctx, rec)
 	default:
 		return fmt.Errorf("job: unknown kind %q", rec.Job.Kind)
 	}

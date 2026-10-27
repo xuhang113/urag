@@ -30,8 +30,11 @@
 | `URAG_CHUNK_OVERLAP` | 相邻片段重叠字节 | `100` |
 | `URAG_FIXTURE` | 召回夹具路径 | `testdata/recall/fixture.json` |
 | `URAG_INLINE_JOBS` | `true` 时任务在接口返回前跑完 | `false` |
+| `URAG_MYSQL_DSN` | `urag crawl` 的台账连接。没有它时收录命令退出 | 假 DSN，见 `.env.example` |
+| `URAG_EMBED_MODEL_DIR` | 本地嵌入权重目录。目录不存在时收录命令退出，不下载 | 已有目录 |
+| `URAG_COLLECTION` | 收录写入的集合 | `public` |
 
-`URAG_STORAGE=s3` 且端点、桶或密钥缺失时，进程退出并提示，不会伪造客户端。未设置 `URAG_EMBED_ENDPOINT` 时不会访问嵌入服务。
+`URAG_STORAGE=s3` 且端点、桶或密钥缺失时，进程退出并提示，不会伪造客户端。未设置 `URAG_EMBED_ENDPOINT` 时不会访问嵌入服务。`urag crawl` 在缺少 `URAG_MYSQL_DSN` 或 `URAG_EMBED_MODEL_DIR` 时退出，不会下载权重。
 
 占位示例见仓库根目录的 `.env.example`。不要把真实密钥写进这个文件。
 
@@ -47,7 +50,17 @@ go test ./...
 go test ./internal/job/
 ```
 
-测试不访问外网。页面测试使用 `httptest`，不监听真实端口。存储、嵌入和索引在本分支仍返回未实现时，五个页面测试会失败；`go test ./internal/job/` 使用测试里的假依赖，应当通过。
+`go test ./...` 不访问外网，不连接 MySQL，也不下载模型。页面测试和 HTTP 来源使用 `httptest`，不监听真实端口。提问和评价仍读召回夹具，走内存索引和夹具嵌入。
+
+## 收录
+
+种子文件每行一个站点地图或目录页 URL。空行和以 `#` 开头的行略过。
+
+```bash
+go run ./cmd/urag crawl seeds.txt
+```
+
+命令要求 `URAG_MYSQL_DSN`。权重目录是 `URAG_EMBED_MODEL_DIR`，目录必须已经存在。同一主机相邻请求间隔 1 秒。向量写在 `URAG_DATA_DIR/vectors`。原文只留下来源 URL，不写入对象存储。成功时打印该集合的篇数，篇数来自 `catalog.CountIndexed`。
 
 ## 验收页
 

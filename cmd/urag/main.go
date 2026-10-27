@@ -1,23 +1,35 @@
-// Command urag 从环境变量组装依赖并启动验收页。
+// Command urag 从环境变量组装依赖。
+// serve 启动验收页。crawl 从来源 URL 收录，不把原文写入对象存储。
 // 它不实现存储、清洗、切分、嵌入或检索。
 package main
 
 import (
+	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
+	"time"
 
+	"github.com/xuhang113/urag/internal/acquire"
+	"github.com/xuhang113/urag/internal/catalog"
 	"github.com/xuhang113/urag/internal/chunk"
 	"github.com/xuhang113/urag/internal/clean"
 	"github.com/xuhang113/urag/internal/embed"
 	"github.com/xuhang113/urag/internal/index"
 	"github.com/xuhang113/urag/internal/job"
+	"github.com/xuhang113/urag/internal/model"
 	"github.com/xuhang113/urag/internal/retrieve"
 	"github.com/xuhang113/urag/internal/storage"
 	"github.com/xuhang113/urag/internal/web"
 )
+
+// qwenMeta 是本地嵌入权重的模型名和维度。目录里的配置必须与此一致，程序不改维度，也不下载。
+var qwenMeta = embed.ModelMeta{Name: "Qwen/Qwen3-Embedding-4B", Dim: 2560}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -31,13 +43,128 @@ func run(args []string) error {
 	if len(args) > 0 {
 		cmd = args[0]
 	}
-	if cmd != "serve" {
+	switch cmd {
+	case "serve":
+		if len(args) > 1 {
+			return fmt.Errorf("urag: unexpected arguments")
+		}
+		return serve()
+	case "crawl":
+		return crawl(args[1:])
+	default:
 		return fmt.Errorf("urag: unknown command %q", cmd)
 	}
-	if len(args) > 1 {
-		return fmt.Errorf("urag: unexpected arguments")
+}
+
+// crawl 从种子文件读取站点地图或目录页 URL。
+// 没有 URAG_MYSQL_DSN 时退出。权重目录 URAG_EMBED_MODEL_DIR 不存在时退出，不下载。
+func crawl(args []string) error {
+	if len(args) != 1 {
+		return errors.New("urag: crawl 需要一个种子文件")
 	}
-	return serve()
+	seeds, err := readSeeds(args[0])
+	if err != nil {
+		return err
+	}
+	dsn := strings.TrimSpace(os.Getenv("URAG_MYSQL_DSN"))
+	if dsn == "" {
+		return errors.New("urag: 缺少 URAG_MYSQL_DSN，无法写入台账")
+	}
+	modelDir := strings.TrimSpace(os.Getenv("URAG_EMBED_MODEL_DIR"))
+	if modelDir == "" {
+		return errors.New("urag: 缺少 URAG_EMBED_MODEL_DIR，不会下载嵌入模型")
+	}
+	info, err := os.Stat(modelDir)
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("urag: 嵌入权重目录 %s 不存在，不会下载", modelDir)
+	}
+
+	cfg, err := configFromEnv()
+	if err != nil {
+		return err
+	}
+	cfg.Inline = true
+	db, err := catalog.NewMySQL(dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.ApplySchema(ctx); err != nil {
+		return err
+	}
+	emb, err := embed.NewQwen(modelDir, qwenMeta)
+	if err != nil {
+		return err
+	}
+	reg, err := index.NewDisk(filepath.Join(cfg.DataDir, "vectors"), qwenMeta)
+	if err != nil {
+		return err
+	}
+	disk, ok := reg.(*index.Disk)
+	if !ok {
+		return errors.New("urag: 磁盘索引不可用")
+	}
+	// 收录不调用 Store.Put。本地目录只用来满足管道构造。
+	store, err := storage.NewLocal(cfg.DataDir, cfg.Retry, nil)
+	if err != nil {
+		return err
+	}
+	pipeline, err := job.New(cfg, job.Deps{
+		Store:    store,
+		Embedder: emb,
+		Registry: reg,
+		Reranker: retrieve.NewOverlapReranker(),
+		Splitter: chunk.NewParagraph(),
+		Cleaner:  clean.New(clean.NewMemoryDeduper()),
+		Catalog:  db,
+		Vectors:  disk,
+	})
+	if err != nil {
+		return err
+	}
+	col := model.CollectionID(envOr("URAG_COLLECTION", "public"))
+	result, err := pipeline.SubmitCrawl(ctx, job.CrawlInput{
+		CollectionID: col,
+		Seeds:        seeds,
+		Limits:       acquire.CrawlLimits{PerHostInterval: time.Second},
+	})
+	if err != nil {
+		if result.Error != "" {
+			return fmt.Errorf("urag: crawl: %s", result.Error)
+		}
+		return err
+	}
+	n, err := db.CountIndexed(ctx, string(col))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("收录完成，集合 %s 篇数 %d\n", col, n)
+	return nil
+}
+
+func readSeeds(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("urag: 读取种子文件: %w", err)
+	}
+	defer f.Close()
+	var seeds []string
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		seeds = append(seeds, line)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("urag: 读取种子文件: %w", err)
+	}
+	if len(seeds) == 0 {
+		return nil, errors.New("urag: 种子文件没有 URL")
+	}
+	return seeds, nil
 }
 
 // serve 是默认子命令。

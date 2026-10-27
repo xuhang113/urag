@@ -6,7 +6,7 @@
 
 - `internal/model` 只有共享类型。
 - `internal/storage` 流式存放原文。不清洗，不建索引，不导出云厂商客户端类型。
-- `internal/acquire` 把来源收成原文。数据库、站点地图、厂商 API 只有构造函数，返回未实现。
+- `internal/acquire` 把来源收成原文。公开收录只列出文档并在 `Open` 时打开正文流，不把原文写入对象存储。数据库和厂商 API 只有构造函数，返回未实现。
 - `internal/clean` 得到 UTF-8 正文和血缘。不切分，不嵌入。
 - `internal/chunk` 切片段。不嵌入，不检索。
 - `internal/embed` 把文本变成向量。
@@ -15,7 +15,7 @@
 - `internal/eval` 计算 Recall@K 和 MRR，不改索引。
 - `internal/job` 编排任务，不提供页面。
 - `internal/web` 只做页面和 JSON。不算向量，不把上传正文读进内存。
-- `cmd/urag` 只组装依赖并监听。
+- `cmd/urag` 只组装依赖。`serve` 监听验收页，`crawl` 按种子文件收录。
 
 ## 测试
 
