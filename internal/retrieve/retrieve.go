@@ -6,6 +6,7 @@ package retrieve
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"sort"
 
@@ -33,7 +34,8 @@ type Request struct {
 }
 
 // Hit 是合并后的一条命中。每条都带 CollectionID。
-// StartByte 与 EndByte 是原文 Document.Text 上的字节位置。
+// StartByte 与 EndByte 是原文 Document.Text 上的字节位置。磁盘子块没有字节区间时为 0。
+// ParentID 与 HeadingPath 的 JSON 字段是 parent_id、heading_path。
 type Hit struct {
 	CollectionID model.CollectionID `json:"collection_id"`
 	DocumentID   model.DocumentID   `json:"document_id"`
@@ -42,6 +44,18 @@ type Hit struct {
 	Score        float64            `json:"score"`
 	StartByte    int                `json:"start_byte"`
 	EndByte      int                `json:"end_byte"`
+	ParentID     int64              `json:"parent_id"`
+	HeadingPath  string             `json:"heading_path"`
+}
+
+const (
+	childRecallLimit = 50
+	childKeepLimit   = 8
+)
+
+// ParentLookup 按父块编号取出整节正文。
+type ParentLookup interface {
+	GetParent(ctx context.Context, parentID int64) (body string, err error)
 }
 
 // Reranker 对已经合并的命中重新排序。
@@ -59,6 +73,12 @@ type Service interface {
 	// Rerank 为 true 且构造时传入了非空 Reranker 时，对合并结果重排，再截断到 TopK。
 	// 每条 Hit 都带 CollectionID。
 	Retrieve(ctx context.Context, req Request) ([]Hit, error)
+
+	// RetrieveChildren 只打开 req.Collections。
+	// 混合召回先取前 50 个子块，再只把这 50 对送给 rerank。
+	// 查询侧使用 embed.QueryText，子块嵌入文本是标题路径和正文。
+	// 重排后留下最多 8 条。parents 为空或查不到时，Text 保持子块正文。
+	RetrieveChildren(ctx context.Context, req Request, rerank PassageReranker, parents ParentLookup) ([]Hit, error)
 }
 
 type service struct {
@@ -76,7 +96,7 @@ func New(reg index.Registry, emb embed.Embedder, weights Weights, reranker Reran
 		weights.Vector = 0.7
 		weights.Keyword = 0.3
 	}
-	return service{reg: reg, emb: emb, weights: weights, reranker: reranker}
+	return &service{reg: reg, emb: emb, weights: weights, reranker: reranker}
 }
 
 func (s service) Retrieve(ctx context.Context, req Request) ([]Hit, error) {
@@ -126,18 +146,7 @@ func (s service) Retrieve(ctx context.Context, req Request) ([]Hit, error) {
 		merged = append(merged, hits...)
 	}
 
-	sort.Slice(merged, func(i, j int) bool {
-		if merged[i].Score == merged[j].Score {
-			if merged[i].CollectionID == merged[j].CollectionID {
-				if merged[i].DocumentID == merged[j].DocumentID {
-					return merged[i].ChunkID < merged[j].ChunkID
-				}
-				return merged[i].DocumentID < merged[j].DocumentID
-			}
-			return merged[i].CollectionID < merged[j].CollectionID
-		}
-		return merged[i].Score > merged[j].Score
-	})
+	sortHits(merged)
 
 	if req.Rerank && s.reranker != nil {
 		reranked, err := s.reranker.Rerank(ctx, req.Query, merged)
@@ -177,7 +186,8 @@ func (s service) searchOne(ctx context.Context, idx index.Index, q index.Query, 
 
 	seen := make(map[model.ChunkID]struct{})
 	out := make([]Hit, 0)
-	add := func(chunk model.Chunk, cos, kw float64) {
+	add := func(h index.Hit, cos, kw float64) {
+		chunk := h.Chunk
 		if _, ok := seen[chunk.ID]; ok {
 			return
 		}
@@ -197,15 +207,152 @@ func (s service) searchOne(ctx context.Context, idx index.Index, q index.Query, 
 			Score:        score,
 			StartByte:    chunk.StartByte,
 			EndByte:      chunk.EndByte,
+			ParentID:     h.ParentID,
+			HeadingPath:  h.HeadingPath,
 		})
 	}
 	for _, h := range vecHits {
-		add(h.Chunk, h.Score, kwByID[h.Chunk.ID])
+		add(h, h.Score, kwByID[h.Chunk.ID])
 	}
 	for _, h := range kwHits {
-		add(h.Chunk, 0, h.Score)
+		add(h, 0, h.Score)
 	}
 	return out, nil
+}
+
+func sortHits(hits []Hit) {
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].Score == hits[j].Score {
+			if hits[i].CollectionID == hits[j].CollectionID {
+				if hits[i].DocumentID == hits[j].DocumentID {
+					return hits[i].ChunkID < hits[j].ChunkID
+				}
+				return hits[i].DocumentID < hits[j].DocumentID
+			}
+			return hits[i].CollectionID < hits[j].CollectionID
+		}
+		return hits[i].Score > hits[j].Score
+	})
+}
+
+// RetrieveChildren 混合召回点名集合中的子块，只把前 50 条送去重排，再留下最多 8 条。
+// 查询向量和重排查询都是 embed.QueryText(问题)。文档侧不加指令。
+// 子块嵌入文本是 heading_path + "\n" + body；标题路径为空时只有 body。
+// 重排只产出分数。parents 为 nil，或父块查不到时，Hit.Text 保持子块 body。
+// 未点名的集合不会被打开。不使用服务里原来的 Reranker，也不加载嵌入模型。
+func (s *service) RetrieveChildren(ctx context.Context, req Request, rerank PassageReranker, parents ParentLookup) ([]Hit, error) {
+	if s == nil {
+		return nil, errors.New("retrieve: nil service")
+	}
+	if len(req.Collections) == 0 {
+		return nil, ErrCollectionsRequired
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s.reg == nil {
+		return nil, errors.New("retrieve: nil registry")
+	}
+	if s.emb == nil {
+		return nil, errors.New("retrieve: nil embedder")
+	}
+	if rerank == nil {
+		return nil, errors.New("retrieve: nil reranker")
+	}
+
+	queryText := embed.QueryText(req.Query)
+	vecs, err := s.emb.Embed(ctx, []string{queryText})
+	if err != nil {
+		return nil, err
+	}
+	if len(vecs) != 1 {
+		return nil, errors.New("retrieve: embedder returned unexpected count")
+	}
+	qtokens := embed.Tokens(req.Query)
+
+	merged := make([]Hit, 0)
+	for _, id := range req.Collections {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		idx, err := s.reg.Open(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if idx.Collection() != id {
+			return nil, errors.New("retrieve: opened a different collection")
+		}
+		hits, err := s.searchOne(ctx, idx, index.Query{
+			CollectionID: id,
+			Vector:       vecs[0],
+			Tokens:       qtokens,
+			TopK:         math.MaxInt,
+		}, true)
+		if err != nil {
+			return nil, err
+		}
+		merged = append(merged, hits...)
+	}
+	sortHits(merged)
+	if len(merged) > childRecallLimit {
+		merged = merged[:childRecallLimit]
+	}
+
+	passages := make([]string, len(merged))
+	for i := range merged {
+		passages[i] = childEmbedText(merged[i].HeadingPath, merged[i].Text)
+	}
+	scores, err := rerank.Score(ctx, queryText, passages)
+	if err != nil {
+		return nil, err
+	}
+	if len(scores) != len(passages) {
+		return nil, fmt.Errorf("retrieve: reranker returned %d scores for %d passages", len(scores), len(passages))
+	}
+	for i, score := range scores {
+		if math.IsNaN(score) {
+			return nil, errors.New("retrieve: reranker returned NaN")
+		}
+		merged[i].Score = score
+	}
+	sortHits(merged)
+	if len(merged) > childKeepLimit {
+		merged = merged[:childKeepLimit]
+	}
+	if merged == nil {
+		merged = []Hit{}
+	}
+	return applyParents(ctx, merged, parents)
+}
+
+func childEmbedText(heading, body string) string {
+	if heading == "" {
+		return body
+	}
+	return heading + "\n" + body
+}
+
+func applyParents(ctx context.Context, hits []Hit, parents ParentLookup) ([]Hit, error) {
+	if parents == nil {
+		return hits, nil
+	}
+	for i := range hits {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		body, err := parents.GetParent(ctx, hits[i].ParentID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		if body == "" {
+			continue
+		}
+		hits[i].Text = body
+	}
+	return hits, nil
 }
 
 type overlapReranker struct{}

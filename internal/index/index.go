@@ -11,10 +11,14 @@ import (
 
 // Hit 是一个集合内的一条命中。
 // CollectionID 与这条命中所属的集合相同。
+// 内存索引没有父块，ParentID 为 0，HeadingPath 为空。
+// 磁盘记录把父块编号和标题路径带到命中上。
 type Hit struct {
 	Chunk        model.Chunk
 	Score        float64
 	CollectionID model.CollectionID
+	ParentID     int64
+	HeadingPath  string
 }
 
 // Query 是对一个集合的查询。CollectionID 必须点名。

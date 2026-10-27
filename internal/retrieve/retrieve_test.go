@@ -2,6 +2,7 @@ package retrieve_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
 	"testing"
@@ -75,8 +76,8 @@ func TestRetrieveHybridHandScore(t *testing.T) {
 func TestOverlapRerankerHandScore(t *testing.T) {
 	rr := retrieve.NewOverlapReranker()
 	hits := []retrieve.Hit{
-		{DocumentID: "silver", ChunkID: "silver#0", Text: "silver", Score: 4},
-		{DocumentID: "crimson", ChunkID: "crimson#0", Text: "crimson", Score: 0},
+		{DocumentID: "silver", ChunkID: "silver#0", Text: "silver", Score: 4, ParentID: 0, HeadingPath: ""},
+		{DocumentID: "crimson", ChunkID: "crimson#0", Text: "crimson", Score: 0, ParentID: 0, HeadingPath: ""},
 	}
 	out, err := rr.Rerank(context.Background(), "Crimson!", hits)
 	if err != nil {
@@ -137,5 +138,34 @@ func TestRetrieveRerankOrdersByOverlap(t *testing.T) {
 	}
 	if hits[0].CollectionID != "alpha" || hits[1].CollectionID != "alpha" {
 		t.Fatalf("%+v", hits)
+	}
+}
+
+func TestHitJSONParentFields(t *testing.T) {
+	raw, err := json.Marshal(retrieve.Hit{
+		CollectionID: "alpha",
+		DocumentID:   "7",
+		ChunkID:      "7#0",
+		Text:         "body",
+		Score:        1,
+		StartByte:    1,
+		EndByte:      2,
+		ParentID:     9,
+		HeadingPath:  "A/B",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"collection_id", "document_id", "chunk_id", "text", "score", "start_byte", "end_byte", "parent_id", "heading_path"} {
+		if _, ok := got[key]; !ok {
+			t.Fatalf("missing %s in %s", key, raw)
+		}
+	}
+	if got["parent_id"] != float64(9) || got["heading_path"] != "A/B" {
+		t.Fatalf("%s", raw)
 	}
 }

@@ -57,3 +57,26 @@ func MeanReciprocalRank(questions []Question, hits [][]retrieve.Hit) ([]Score, e
 ### T5.2 TestContrastSplitterWorse
 
 用 `contrast_drop_terms` 构造 `drop_keywords` 切分，同一套题目再评价一次。断言每个单集合的 Recall@K 都不高于 0.4。高于 `contrast_recall_at_k_max` 则失败。与 paragraph 基线相比，报告 `Direction` 为 down。没有这份报告，不得声称召回变好。
+
+## 查询前缀、磁盘索引和子块重排
+
+夹具评价仍走内存索引、`embed.NewFixture` 和 `Retrieve`。不改 `testdata/recall/fixture.json`，也不把夹具向量改成 2560 维。`Retrieve` 的查询文本不加指令，Recall@5 和 MRR 的算法与阈值不变。
+
+查询侧前缀是 `embed.QueryInstruct`：
+
+```text
+Instruct: Given a web search query, retrieve relevant passages that answer the query
+Query:
+```
+
+`QueryText` 把前缀和问题直接拼在一起，`Query:` 后面不加空格。文档侧 `Embed` 不加这段指令。
+
+`NewQwen` 只读本地权重。目录不存在，或维度不是 2560，就返回错误。不下载，也不改维度。模型名是 `Qwen/Qwen3-Embedding-4B`，维度是 2560。
+
+`NewDisk` 一个集合一个目录，按批写入，搜索时不把全部向量读进内存。元数据记下模型名和维度。打开时不一致就返回错误，禁止用旧向量搜索。分数小于等于 0 的不返回。关键词索引仍是这个集合自己的。未点名的集合不打开，也搜不到。
+
+`Hit` 增加 `parent_id` 和 `heading_path`。原有字段保留。
+
+`RetrieveChildren` 只打开请求里点名的集合。混合召回先取前 50 个子块，只把这 50 对送去重排：查询是 `QueryText(问题)`，子块嵌入文本是 `heading_path + "\n" + body`，标题路径为空时只有 body。重排只产出分数，不生成答案。留下最多 8 条；不足 8 条就全留。然后按 `parent_id` 取父块整节并替换 `Text`。`parents` 为空或查不到时，`Text` 保持子块 body。每条命中都带 `collection_id`、`document_id`、`chunk_id`、`score`、`start_byte`、`end_byte`、`parent_id`、`heading_path`。
+
+`NewQwenReranker` 在目录不存在时返回错误，不下载，也不加载嵌入模型。`NewOverlapReranker` 仍给原来的 `Retrieve` 使用。嵌入模型和重排模型不要同时加载。
