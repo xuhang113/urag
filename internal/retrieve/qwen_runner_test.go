@@ -202,6 +202,9 @@ func TestQwenRerankScriptIsLocal(t *testing.T) {
 		"local_files_only=True",
 		"mps",
 		"2560",
+		"load_rerank_done",
+		"rerank_done",
+		"URAG_STEP_FD",
 	} {
 		if !strings.Contains(text, frag) {
 			t.Fatalf("script missing %s", frag)

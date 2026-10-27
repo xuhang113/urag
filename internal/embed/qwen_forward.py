@@ -28,6 +28,17 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 HIDDEN = 2560
 
 
+def note(token):
+    # 试查进程把阶段描述符放在 URAG_STEP_FD。收录不设置它，这里直接返回。
+    raw = os.environ.get("URAG_STEP_FD")
+    if not raw:
+        return
+    try:
+        os.write(int(raw), (token + "\n").encode())
+    except (OSError, ValueError):
+        return
+
+
 def require_hidden(model_dir):
     path = os.path.join(model_dir, "config.json")
     try:
@@ -152,11 +163,13 @@ def main():
             if model is None:
                 model, tokenizer, device = load_model(model_dir)
                 loaded_dir = model_dir
+                note("load_embed_done")
             elif model_dir != loaded_dir:
                 raise SystemExit("model directory changed, refusing to reload")
             vectors = embed_texts(model, tokenizer, device, texts)
             if len(vectors) != len(texts):
                 raise SystemExit("vector count mismatch")
+            note("query_vector_done")
             write_vectors(real_stdout, vectors)
     except SystemExit:
         raise

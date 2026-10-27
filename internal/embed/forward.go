@@ -1,6 +1,7 @@
 package embed
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -30,6 +31,12 @@ func RunLocalProcess(ctx context.Context, kind string, argv []string, stdin []by
 	})
 	if err != nil {
 		return nil, err
+	}
+	// 嵌入进程已经退出，模型不再占内存。重排进程不发这个记号。
+	// 记号在读完阶段管道之后才发，所以会排在查询向量完成之后。
+	if kind == KindEmbed {
+		EmitStep(ctx, "unload_embed")
+		EmitStep(ctx, "unload_embed_done")
 	}
 	return out, nil
 }
@@ -86,6 +93,28 @@ func execForward(ctx context.Context, argv []string, stdin []byte) ([]byte, erro
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Stdin = bytes.NewReader(stdin)
 	cmd.Env = forwardEnv()
+	// 阶段记号走额外描述符，不进 stdout，也不混进错误信息。
+	// 父进程在启动后关掉写端，子进程退出时读端才会结束。
+	stepR, stepW, pipeErr := os.Pipe()
+	var readerDone chan struct{}
+	if pipeErr == nil {
+		cmd.ExtraFiles = []*os.File{stepW}
+		cmd.Env = append(cmd.Env, "URAG_STEP_FD=3")
+		readerDone = make(chan struct{})
+		go func() {
+			defer close(readerDone)
+			readStepFD(ctx, stepR)
+			_ = stepR.Close()
+		}()
+	}
+	defer func() {
+		if stepW != nil {
+			_ = stepW.Close()
+		}
+		if readerDone != nil {
+			<-readerDone
+		}
+	}()
 	var stderr tailBuf
 	stderr.max = 8192
 	cmd.Stderr = &stderr
@@ -95,6 +124,10 @@ func execForward(ctx context.Context, argv []string, stdin []byte) ([]byte, erro
 	}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("embed: qwen forward: %w", err)
+	}
+	if stepW != nil {
+		_ = stepW.Close()
+		stepW = nil
 	}
 	type readResult struct {
 		out []byte
@@ -131,6 +164,17 @@ func execForward(ctx context.Context, argv []string, stdin []byte) ([]byte, erro
 			return nil, forwardErr(waitErr, stderr.String())
 		}
 		return got.out, nil
+	}
+}
+
+func readStepFD(ctx context.Context, r io.Reader) {
+	sc := bufio.NewScanner(r)
+	for sc.Scan() {
+		token := strings.TrimSpace(sc.Text())
+		if token == "" {
+			continue
+		}
+		EmitStep(ctx, token)
 	}
 }
 

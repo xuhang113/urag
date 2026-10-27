@@ -23,6 +23,17 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 HIDDEN = 2560
 
 
+def note(token):
+    # 试查把阶段描述符放在 URAG_STEP_FD。没有这个变量时不写任何记号。
+    raw = os.environ.get("URAG_STEP_FD")
+    if not raw:
+        return
+    try:
+        os.write(int(raw), (token + "\n").encode())
+    except (OSError, ValueError):
+        return
+
+
 def require_hidden(model_dir):
     path = os.path.join(model_dir, "config.json")
     try:
@@ -76,6 +87,7 @@ def score_batch(req):
     model.to(device)
     model.eval()
     model.config.use_cache = False
+    note("load_rerank_done")
 
     prefix = (
         "<|im_start|>system\n"
@@ -114,6 +126,7 @@ def score_batch(req):
         values = scores.tolist()
     if len(values) != len(pairs):
         raise SystemExit("score count does not match the batch")
+    note("rerank_done")
     return {"scores": values}
 
 

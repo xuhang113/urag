@@ -228,6 +228,8 @@ label { display: block; margin: 0.8rem 0 0.2rem; }
 input, select, button, textarea { font: inherit; }
 table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
 th, td { border: 1px solid #ccc; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; word-break: break-word; }
+#try-log { margin: 0.8rem 0; padding-left: 1.2rem; }
+#try-log li.pending { font-weight: 600; }
 .err { color: #8a1f1f; }
 .meta dt { font-weight: 600; }
 .meta dd { margin: 0 0 0.4rem; word-break: break-all; }
@@ -354,74 +356,155 @@ const askHTML = `{{define "ask"}}
 {{end}}`
 
 const tryHTML = `{{define "try"}}
-<p>只查集合 {{.Try.Collection}}。磁盘向量和这个集合的 BM25 合并后留下前 50 条，再重排。分数高于门槛才显示，最多 8 条。嵌入模型退出后才加载重排模型。</p>
+<p>只查集合 {{.Try.Collection}}。磁盘向量和这个集合的 BM25 合并后留下前 50 条，再重排。分数高于门槛才显示，最多 8 条。嵌入模型退出后才加载重排模型。下面按这次查询的实际顺序显示步骤，进行中的一步标成未完成。</p>
 <form id="try-form">
 <label for="query">问题</label>
 <input id="query" name="query" required>
 <button type="submit">试查</button>
 </form>
+<ol id="try-log"></ol>
 <p id="try-status"></p>
 <p id="try-error" class="err"></p>
 <div id="try-result"></div>
 <script>
 (function () {
   var form = document.getElementById("try-form");
+  var log = document.getElementById("try-log");
   var status = document.getElementById("try-status");
   var err = document.getElementById("try-error");
   var result = document.getElementById("try-result");
+  var items = {};
+  function upsert(step) {
+    var li = items[step.name];
+    if (!li) {
+      li = document.createElement("li");
+      items[step.name] = li;
+      log.appendChild(li);
+    }
+    li.className = step.done ? "done" : "pending";
+    li.textContent = step.name + (step.done ? " 完成" : " 未完成");
+  }
+  function showHits(hits) {
+    result.textContent = "";
+    if (!hits || !hits.length) {
+      status.textContent = "没有足够相关的片段";
+      return;
+    }
+    status.textContent = "命中 " + hits.length + " 条";
+    var table = document.createElement("table");
+    var head = document.createElement("tr");
+    ["collection_id", "heading_path", "原文位置", "分数", "子块", "父块"].forEach(function (name) {
+      var th = document.createElement("th");
+      th.textContent = name;
+      head.appendChild(th);
+    });
+    var thead = document.createElement("thead");
+    thead.appendChild(head);
+    table.appendChild(thead);
+    var body = document.createElement("tbody");
+    hits.forEach(function (hit) {
+      var tr = document.createElement("tr");
+      var pos = String(hit.start_byte) + "–" + String(hit.end_byte);
+      [hit.collection_id, hit.heading_path || "", pos, String(hit.score), hit.chunk || "", hit.parent || ""].forEach(function (value) {
+        var td = document.createElement("td");
+        td.textContent = value == null ? "" : String(value);
+        tr.appendChild(td);
+      });
+      body.appendChild(tr);
+    });
+    table.appendChild(body);
+    result.appendChild(table);
+  }
+  function applyBlock(block) {
+    var eventName = "message";
+    var data = "";
+    block.split("\n").forEach(function (line) {
+      if (line.indexOf("event:") === 0) {
+        eventName = line.slice(6).replace(/^\s+/, "");
+      } else if (line.indexOf("data:") === 0) {
+        data += line.slice(5).replace(/^\s+/, "");
+      }
+    });
+    if (!data || data.charAt(0) === ":") {
+      return;
+    }
+    var payload = JSON.parse(data);
+    if (eventName === "step") {
+      upsert(payload);
+      return;
+    }
+    if (eventName === "result") {
+      showHits(payload.hits || []);
+      return;
+    }
+    if (eventName === "error") {
+      status.textContent = "";
+      err.textContent = payload.message || "检索失败";
+    }
+  }
   form.addEventListener("submit", function (ev) {
     ev.preventDefault();
     var query = document.getElementById("query").value;
     err.textContent = "";
     result.textContent = "";
-    status.textContent = "正在检索。先加载嵌入模型，退出后再加载重排模型。";
+    status.textContent = "";
+    log.textContent = "";
+    items = {};
     var timeoutText = "检索超时。收录正在占用嵌入模型，这次没有结果。";
     var controller = new AbortController();
     var timer = window.setTimeout(function () {
       controller.abort();
     }, 180000);
+    var pending = "";
+    function consume(text) {
+      pending += text;
+      var parts = pending.split("\n\n");
+      pending = parts.pop();
+      parts.forEach(function (block) {
+        if (block.replace(/\s/g, "") !== "") {
+          applyBlock(block);
+        }
+      });
+    }
     fetch("/api/try", {
       method: "POST",
-      headers: {"Content-Type": "application/json"},
+      headers: {"Content-Type": "application/json", "Accept": "text/event-stream"},
       body: JSON.stringify({query: query}),
       signal: controller.signal
     }).then(function (res) {
-      return res.text().then(function (text) {
-        if (!res.ok) {
+      var type = res.headers.get("content-type") || "";
+      if (type.indexOf("text/event-stream") === -1) {
+        return res.text().then(function (text) {
+          if (!res.ok) {
+            throw new Error(text || ("HTTP " + res.status));
+          }
+          showHits(JSON.parse(text));
+        });
+      }
+      if (!res.ok) {
+        return res.text().then(function (text) {
           throw new Error(text || ("HTTP " + res.status));
-        }
-        return JSON.parse(text);
-      });
-    }).then(function (hits) {
-      if (!hits || !hits.length) {
-        status.textContent = "没有足够相关的片段";
+        });
+      }
+      var reader = res.body.getReader();
+      var decoder = new TextDecoder();
+      function pump() {
+        return reader.read().then(function (chunk) {
+          if (chunk.done) {
+            if (pending.replace(/\s/g, "") !== "") {
+              applyBlock(pending);
+            }
+            return;
+          }
+          consume(decoder.decode(chunk.value, {stream: true}));
+          return pump();
+        });
+      }
+      return pump();
+    }).catch(function (e) {
+      if (err.textContent) {
         return;
       }
-      status.textContent = "命中 " + hits.length + " 条";
-      var table = document.createElement("table");
-      var head = document.createElement("tr");
-      ["collection_id", "heading_path", "原文位置", "分数", "子块", "父块"].forEach(function (name) {
-        var th = document.createElement("th");
-        th.textContent = name;
-        head.appendChild(th);
-      });
-      var thead = document.createElement("thead");
-      thead.appendChild(head);
-      table.appendChild(thead);
-      var body = document.createElement("tbody");
-      hits.forEach(function (hit) {
-        var tr = document.createElement("tr");
-        var pos = String(hit.start_byte) + "–" + String(hit.end_byte);
-        [hit.collection_id, hit.heading_path || "", pos, String(hit.score), hit.chunk || "", hit.parent || ""].forEach(function (value) {
-          var td = document.createElement("td");
-          td.textContent = value == null ? "" : String(value);
-          tr.appendChild(td);
-        });
-        body.appendChild(tr);
-      });
-      table.appendChild(body);
-      result.appendChild(table);
-    }).catch(function (e) {
       status.textContent = "";
       if (e && e.name === "AbortError") {
         err.textContent = timeoutText;

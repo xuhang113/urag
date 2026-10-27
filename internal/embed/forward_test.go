@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -69,6 +70,53 @@ func TestRunLocalProcessStopsWhenContextEnds(t *testing.T) {
 			t.Fatalf("process %d still alive", pid)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestRunLocalProcessReadsStepFD(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "steps.sh")
+	body := "#!/bin/sh\nprintf '%s\\n' load_embed_done query_vector_done >&\"$URAG_STEP_FD\"\nprintf '%s\\n' '{\"ok\":true}'\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var got []string
+	ctx := embed.WithStepHandler(context.Background(), func(token string) {
+		mu.Lock()
+		got = append(got, token)
+		mu.Unlock()
+	})
+	out, err := embed.RunLocalProcess(ctx, embed.KindEmbed, []string{"/bin/sh", script}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"ok":true`) {
+		t.Fatalf("stdout %s", out)
+	}
+	mu.Lock()
+	embedSteps := append([]string(nil), got...)
+	mu.Unlock()
+	want := []string{"load_embed_done", "query_vector_done", "unload_embed", "unload_embed_done"}
+	if strings.Join(embedSteps, ",") != strings.Join(want, ",") {
+		t.Fatalf("embed steps %v", embedSteps)
+	}
+
+	mu.Lock()
+	got = nil
+	mu.Unlock()
+	out, err = embed.RunLocalProcess(ctx, embed.KindRerank, []string{"/bin/sh", script}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"ok":true`) {
+		t.Fatalf("rerank stdout %s", out)
+	}
+	mu.Lock()
+	rerankSteps := append([]string(nil), got...)
+	mu.Unlock()
+	if strings.Join(rerankSteps, ",") != "load_embed_done,query_vector_done" {
+		t.Fatalf("rerank steps %v", rerankSteps)
 	}
 }
 

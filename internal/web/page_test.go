@@ -428,6 +428,9 @@ func TestPageTry(t *testing.T) {
 	if !strings.Contains(body, "没有足够相关的片段") {
 		t.Fatalf("try page missing empty copy: %s", body)
 	}
+	if !strings.Contains(body, `id="try-log"`) || !strings.Contains(body, "未完成") || !strings.Contains(body, "text/event-stream") {
+		t.Fatalf("try page missing progress log: %s", body)
+	}
 	ask := get(t, h, "/ask")
 	if ask.Code != http.StatusOK || !strings.Contains(ask.Body.String(), "page-ask") || !strings.Contains(ask.Body.String(), "提问") {
 		t.Fatalf("ask page missing: %d %s", ask.Code, ask.Body.String())

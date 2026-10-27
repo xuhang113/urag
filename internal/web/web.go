@@ -165,6 +165,10 @@ func (s *server) apiTry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "web: query required", http.StatusBadRequest)
 		return
 	}
+	if wantsTryStream(r) {
+		s.streamTry(w, r, in.Query)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), trySearchTimeout)
 	defer cancel()
 	type tryOutcome struct {

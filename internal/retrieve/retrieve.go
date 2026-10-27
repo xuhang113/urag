@@ -288,16 +288,30 @@ func (s *service) RetrieveChildren(ctx context.Context, req Request, rerank Pass
 	}
 
 	queryText := embed.QueryText(req.Query)
+	ctx = bindModelSteps(ctx)
+	// 先标成未完成。模型闸被收录占用时，这一步会一直停在这里，直到嵌入进程真正启动。
+	Report(ctx, StepLoadEmbed, false)
 	vecs, err := s.emb.Embed(ctx, []string{queryText})
 	if err != nil {
 		return nil, err
+	}
+	if !StepDone(ctx, StepQueryVector) {
+		Report(ctx, StepLoadEmbed, true)
+		Report(ctx, StepQueryVector, true)
 	}
 	if len(vecs) != 1 {
 		return nil, errors.New("retrieve: embedder returned unexpected count")
 	}
 	qtokens := embed.Tokens(req.Query)
 
-	merged := make([]Hit, 0)
+	type openedChild struct {
+		id  model.CollectionID
+		idx index.Index
+		q   index.Query
+		vec []index.Hit
+		kw  []index.Hit
+	}
+	opened := make([]openedChild, 0, len(req.Collections))
 	for _, id := range req.Collections {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -309,22 +323,46 @@ func (s *service) RetrieveChildren(ctx context.Context, req Request, rerank Pass
 		if idx.Collection() != id {
 			return nil, errors.New("retrieve: opened a different collection")
 		}
-		q := index.Query{
-			CollectionID: id,
-			Vector:       vecs[0],
-			Tokens:       qtokens,
-			TopK:         childCandidateK,
-			Rank:         index.RankBM25,
+		opened = append(opened, openedChild{
+			id:  id,
+			idx: idx,
+			q: index.Query{
+				CollectionID: id,
+				Vector:       vecs[0],
+				Tokens:       qtokens,
+				TopK:         childCandidateK,
+				Rank:         index.RankBM25,
+			},
+		})
+	}
+	Report(ctx, StepVectorSearch, false)
+	for i := range opened {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		vecHits, err := idx.SearchVector(ctx, q)
+		hits, err := opened[i].idx.SearchVector(ctx, opened[i].q)
 		if err != nil {
 			return nil, err
 		}
-		kwHits, err := idx.SearchKeyword(ctx, q)
+		opened[i].vec = hits
+	}
+	Report(ctx, StepVectorSearch, true)
+	Report(ctx, StepBM25, false)
+	for i := range opened {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		hits, err := opened[i].idx.SearchKeyword(ctx, opened[i].q)
 		if err != nil {
 			return nil, err
 		}
-		hits, err := mergeChildHits(id, vecHits, kwHits, s.weights)
+		opened[i].kw = hits
+	}
+	Report(ctx, StepBM25, true)
+	Report(ctx, StepMergeTop50, false)
+	merged := make([]Hit, 0)
+	for _, item := range opened {
+		hits, err := mergeChildHits(item.id, item.vec, item.kw, s.weights)
 		if err != nil {
 			return nil, err
 		}
@@ -334,14 +372,22 @@ func (s *service) RetrieveChildren(ctx context.Context, req Request, rerank Pass
 	if len(merged) > childRecallLimit {
 		merged = merged[:childRecallLimit]
 	}
+	Report(ctx, StepMergeTop50, true)
 
 	passages := make([]string, len(merged))
 	for i := range merged {
 		passages[i] = childEmbedText(merged[i].HeadingPath, merged[i].Text)
 	}
+	if len(passages) > 0 {
+		Report(ctx, StepLoadRerank, false)
+	}
 	scores, err := rerank.Score(ctx, queryText, passages)
 	if err != nil {
 		return nil, err
+	}
+	if len(passages) > 0 && !StepDone(ctx, StepRerank) {
+		Report(ctx, StepLoadRerank, true)
+		Report(ctx, StepRerank, true)
 	}
 	if len(scores) != len(passages) {
 		return nil, fmt.Errorf("retrieve: reranker returned %d scores for %d passages", len(scores), len(passages))
@@ -496,21 +542,48 @@ func (r *releasingEmbedder) Dim() int {
 	return r.inner.Dim()
 }
 
-func (r *releasingEmbedder) Embed(ctx context.Context, texts []string) ([]embed.Vector, error) {
-	defer r.finish()
-	if r == nil || r.inner == nil {
+func (r *releasingEmbedder) Embed(ctx context.Context, texts []string) (vecs []embed.Vector, err error) {
+	if r == nil {
+		return nil, errors.New("retrieve: nil embedder")
+	}
+	defer func() { r.finish(ctx, err == nil) }()
+	if r.inner == nil {
 		return nil, errors.New("retrieve: nil embedder")
 	}
 	return r.inner.Embed(ctx, texts)
 }
 
-func (r *releasingEmbedder) finish() {
+func (r *releasingEmbedder) finish(ctx context.Context, ok bool) {
 	if r == nil || r.release == nil {
 		return
 	}
 	release := r.release
 	r.release = nil
+	// 失败时只关掉进程，不把还没做完的步骤标成完成。
+	// 夹具没有单独的加载记号，向量成功返回后才标完成。
+	if ok && !StepDone(ctx, StepQueryVector) {
+		Report(ctx, StepLoadEmbed, true)
+		Report(ctx, StepQueryVector, true)
+	}
+	if ok && !StepDone(ctx, StepUnloadEmbed) {
+		Report(ctx, StepUnloadEmbed, false)
+	}
 	_ = release()
+	if ok && !StepDone(ctx, StepUnloadEmbed) {
+		Report(ctx, StepUnloadEmbed, true)
+	}
+}
+
+// FillParents 把父块正文写进已经留下的命中。
+// parents 为空或没有命中时不查询，原样返回。
+func FillParents(ctx context.Context, hits []Hit, parents ParentLookup) ([]Hit, error) {
+	if parents == nil || len(hits) == 0 {
+		if hits == nil {
+			return []Hit{}, nil
+		}
+		return hits, nil
+	}
+	return applyParents(ctx, hits, parents)
 }
 
 type overlapReranker struct{}
