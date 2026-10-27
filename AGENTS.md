@@ -1,0 +1,26 @@
+# urag
+
+这是独立的检索程序。不要做成聊天机器人。不要读取或导入 imagine、vgraph 的业务数据。
+
+## 包边界
+
+- `internal/model` 只有共享类型。
+- `internal/storage` 流式存放原文。不清洗，不建索引，不导出云厂商客户端类型。
+- `internal/acquire` 把来源收成原文。数据库、站点地图、厂商 API 只有构造函数，返回未实现。
+- `internal/clean` 得到 UTF-8 正文和血缘。不切分，不嵌入。
+- `internal/chunk` 切片段。不嵌入，不检索。
+- `internal/embed` 把文本变成向量。
+- `internal/index` 一个集合一个索引，没有搜索全部集合的方法。
+- `internal/retrieve` 只检索点名的集合。
+- `internal/eval` 计算 Recall@K 和 MRR，不改索引。
+- `internal/job` 编排任务，不提供页面。
+- `internal/web` 只做页面和 JSON。不算向量，不把上传正文读进内存。
+- `cmd/urag` 只组装依赖并监听。
+
+## 测试
+
+`go test` 不访问外网。页面测试用 `httptest`，不监听真实端口。HTTP 来源只用 `httptest`。
+
+## 密钥
+
+密钥只来自环境变量。不要写进仓库、日志或文档。示例只用假值。

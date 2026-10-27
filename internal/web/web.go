@@ -1,25 +1,44 @@
-// Package web 定义页面和 JSON API 的路由契约。
+// Package web 定义页面和 JSON API。
 // 本包只把请求交给任务、检索和评价入口。
 // 本包不计算向量，也不把上传正文读进内存。
 package web
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
+	"mime/multipart"
 	"net/http"
+	"strings"
+	"time"
 
+	"github.com/xuhang113/urag/internal/eval"
 	"github.com/xuhang113/urag/internal/job"
+	"github.com/xuhang113/urag/internal/model"
+	"github.com/xuhang113/urag/internal/retrieve"
 )
 
 // ErrNotImplemented 表示 HTTP 服务尚未接通。
 var ErrNotImplemented = errors.New("web: not implemented")
 
-// Listen 在 addr 上提供 Handler。
-// 当前返回 ErrNotImplemented，不打开端口。
+// Listen 在 addr 上提供 Handler。addr 为空时使用 :8080。
 func Listen(addr string, p *job.Pipeline) error {
-	return ErrNotImplemented
+	if strings.TrimSpace(addr) == "" {
+		addr = ":8080"
+	}
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           Handler(p),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	return srv.ListenAndServe()
 }
 
-// Handler 的路由契约如下。
+type server struct {
+	p *job.Pipeline
+}
+
+// Handler 注册页面和 JSON API。
 //
 //	GET / 跳转到 /upload。
 //	GET /upload、/fetch、/clean、/ask、/eval 返回对应页面。
@@ -31,10 +50,230 @@ func Listen(addr string, p *job.Pipeline) error {
 //	GET /api/jobs/{id} 返回 job.Job。
 //	GET /api/collections/{id}/documents 返回该集合的文档。
 //	POST /api/retrieve 的 JSON 正文是 retrieve.Request，响应是 []retrieve.Hit。
-//	POST /api/eval 与 GET /api/eval/report 返回 eval.Report。
-//
-// 本包不计算向量，也不把上传文件读进内存。
-// 当前返回 http.NotFoundHandler，不注册上述路由。
+//	POST /api/eval 与 GET /api/eval/report 同时返回正常和对照报告。
 func Handler(p *job.Pipeline) http.Handler {
-	return http.NotFoundHandler()
+	s := &server{p: p}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", s.home)
+	mux.HandleFunc("GET /upload", s.pageUpload)
+	mux.HandleFunc("POST /upload", s.pageUpload)
+	mux.HandleFunc("GET /fetch", s.pageFetch)
+	mux.HandleFunc("POST /fetch", s.pageFetch)
+	mux.HandleFunc("GET /clean", s.pageClean)
+	mux.HandleFunc("GET /ask", s.pageAsk)
+	mux.HandleFunc("GET /eval", s.pageEval)
+	mux.HandleFunc("POST /eval", s.pageEval)
+	mux.HandleFunc("POST /api/uploads", s.apiUpload)
+	mux.HandleFunc("POST /api/fetch", s.apiFetch)
+	mux.HandleFunc("GET /api/jobs/{id}", s.apiJob)
+	mux.HandleFunc("GET /api/collections/{id}/documents", s.apiDocuments)
+	mux.HandleFunc("POST /api/retrieve", s.apiRetrieve)
+	mux.HandleFunc("POST /api/eval", s.apiEval)
+	mux.HandleFunc("GET /api/eval/report", s.apiEval)
+	return mux
+}
+
+func (s *server) home(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/upload", http.StatusFound)
+}
+
+func (s *server) apiUpload(w http.ResponseWriter, r *http.Request) {
+	acc, collection, err := s.acceptUpload(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"job_id":        acc.Job.ID,
+		"object_key":    acc.ObjectKey,
+		"checksum":      acc.Checksum,
+		"size":          acc.Size,
+		"collection_id": collection,
+	})
+}
+
+func (s *server) apiFetch(w http.ResponseWriter, r *http.Request) {
+	if err := s.requirePipeline(); err != nil {
+		writeError(w, err)
+		return
+	}
+	var in job.FetchInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	got, err := s.p.SubmitFetch(r.Context(), in)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"job_id": got.ID})
+}
+
+func (s *server) apiJob(w http.ResponseWriter, r *http.Request) {
+	if err := s.requirePipeline(); err != nil {
+		writeError(w, err)
+		return
+	}
+	got, err := s.p.GetJob(r.Context(), r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, got)
+}
+
+func (s *server) apiDocuments(w http.ResponseWriter, r *http.Request) {
+	if err := s.requirePipeline(); err != nil {
+		writeError(w, err)
+		return
+	}
+	docs, err := s.p.Documents(r.Context(), model.CollectionID(r.PathValue("id")))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, docs)
+}
+
+func (s *server) apiRetrieve(w http.ResponseWriter, r *http.Request) {
+	if err := s.requirePipeline(); err != nil {
+		writeError(w, err)
+		return
+	}
+	var req retrieve.Request
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	hits, err := s.p.Ask(r.Context(), req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if hits == nil {
+		hits = []retrieve.Hit{}
+	}
+	writeJSON(w, http.StatusOK, hits)
+}
+
+func (s *server) apiEval(w http.ResponseWriter, r *http.Request) {
+	payload, err := s.evaluate(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func (s *server) evaluate(r *http.Request) (evalPayload, error) {
+	if err := s.requirePipeline(); err != nil {
+		return evalPayload{}, err
+	}
+	normal, err := s.p.Evaluate(r.Context())
+	if err != nil {
+		return evalPayload{}, err
+	}
+	contrast, err := s.p.EvaluateContrast(r.Context())
+	if err != nil {
+		return evalPayload{}, err
+	}
+	return evalPayload{Normal: normal, Contrast: contrast}, nil
+}
+
+type evalPayload struct {
+	Normal   eval.Report `json:"normal"`
+	Contrast eval.Report `json:"contrast"`
+}
+
+func (s *server) acceptUpload(r *http.Request) (job.Accepted, string, error) {
+	if err := s.requirePipeline(); err != nil {
+		return job.Accepted{}, "", err
+	}
+	reader, err := r.MultipartReader()
+	if err != nil {
+		return job.Accepted{}, "", err
+	}
+	var (
+		collection  string
+		idem        string
+		filename    string
+		contentType string
+	)
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return job.Accepted{}, "", err
+		}
+		switch part.FormName() {
+		case "collection":
+			collection, err = readField(part)
+		case "idempotency_key":
+			idem, err = readField(part)
+		case "file":
+			if strings.TrimSpace(collection) == "" {
+				part.Close()
+				return job.Accepted{}, "", errors.New("web: collection must precede file")
+			}
+			filename = part.FileName()
+			contentType = part.Header.Get("Content-Type")
+			acc, putErr := s.p.AcceptUpload(r.Context(), job.UploadInput{
+				CollectionID:   model.CollectionID(strings.TrimSpace(collection)),
+				IdempotencyKey: model.IdempotencyKey(strings.TrimSpace(idem)),
+				Filename:       filename,
+				ContentType:    contentType,
+				Body:           part,
+			})
+			part.Close()
+			if putErr != nil {
+				return job.Accepted{}, collection, putErr
+			}
+			return acc, strings.TrimSpace(collection), nil
+		default:
+			_, err = readField(part)
+		}
+		part.Close()
+		if err != nil {
+			return job.Accepted{}, "", err
+		}
+	}
+	return job.Accepted{}, "", errors.New("web: file required")
+}
+
+// readField 只读取集合名、幂等键这类短字段。上传文件不经过这里，而是流式交给任务。
+func readField(part *multipart.Part) (string, error) {
+	b, err := io.ReadAll(io.LimitReader(part, 8<<10+1))
+	if err != nil {
+		return "", err
+	}
+	if len(b) > 8<<10 {
+		return "", errors.New("web: field too large")
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+func (s *server) requirePipeline() error {
+	if s == nil || s.p == nil {
+		return errors.New("web: pipeline is nil")
+	}
+	return nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(true)
+	_ = enc.Encode(v)
+}
+
+func writeError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	if errors.Is(err, job.ErrNotFound) {
+		status = http.StatusNotFound
+	}
+	http.Error(w, err.Error(), status)
 }
