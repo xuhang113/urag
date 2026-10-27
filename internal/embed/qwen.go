@@ -1,6 +1,8 @@
 package embed
 
 import (
+	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,7 +13,11 @@ import (
 
 // QueryInstruct 是查询侧嵌入前缀。Query: 后面没有空格。
 // 文档侧 Embed 不添加这段文字。
+// 拼法与本机嵌入模型卡一致：Instruct: {任务}\nQuery:{问题}。
 const QueryInstruct = "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:"
+
+// QwenEmbeddingName 是本地嵌入模型。维度固定 2560，不能改成 0.6B。
+const QwenEmbeddingName = "Qwen/Qwen3-Embedding-4B"
 
 const qwenDim = 2560
 
@@ -27,16 +33,41 @@ type ModelMeta struct {
 	Dim  int
 }
 
+//go:embed qwen_forward.py
+var qwenForwardScript string
+
+type qwenEmbedder struct {
+	dir  string
+	argv []string
+}
+
 // NewQwen 只从 dir 读取本地 Qwen 嵌入权重。
-// 目录不存在，或 meta.Dim 不是 2560，返回错误。
-// 不访问网络，不下载缺失权重，也不把隐藏层改成别的维度。
+// 目录不存在、模型名不是 Qwen/Qwen3-Embedding-4B、meta.Dim 或 config 的 hidden_size 不是 2560、
+// 或缺少权重文件时返回错误。不访问网络，不下载，也不改维度。
 // 文档侧的 Embed 按调用方传入的文本编码，不追加 QueryInstruct。
 // 查询由调用方先用 QueryText 拼好再交给 Embed。
+// 真正的前向发生在 Embed：每个批次启动一次本机 Python，子进程退出后才释放模型闸。
 func NewQwen(dir string, meta ModelMeta) (Embedder, error) {
+	return NewQwenCommand(dir, meta, nil)
+}
+
+// NewQwenCommand 与 NewQwen 做同样的权重检查。
+// argv 为空时用本机 python3 和内置前向脚本。测试传入假命令，不加载真实 4B。
+func NewQwenCommand(dir string, meta ModelMeta, argv []string) (Embedder, error) {
+	if meta.Name != QwenEmbeddingName {
+		return nil, fmt.Errorf("embed: qwen model %q, want %s", meta.Name, QwenEmbeddingName)
+	}
 	if meta.Dim != qwenDim {
 		return nil, fmt.Errorf("embed: qwen dimension %d, want %d", meta.Dim, qwenDim)
 	}
-	info, err := os.Stat(dir)
+	if argv != nil && len(argv) == 0 {
+		return nil, fmt.Errorf("embed: empty forward command")
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(abs)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("embed: qwen weights directory %q does not exist", dir)
@@ -46,22 +77,77 @@ func NewQwen(dir string, meta ModelMeta) (Embedder, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("embed: qwen weights path %q is not a directory", dir)
 	}
-	hidden, err := readHiddenSize(dir)
+	hidden, err := readHiddenSize(abs)
 	if err != nil {
 		return nil, err
 	}
 	if hidden != qwenDim {
 		return nil, fmt.Errorf("embed: qwen hidden size %d, want %d, refusing to change dimension", hidden, qwenDim)
 	}
-	weight, err := findWeightFile(dir)
+	if _, err := findWeightFile(abs); err != nil {
+		return nil, err
+	}
+	return qwenEmbedder{dir: abs, argv: append([]string(nil), argv...)}, nil
+}
+
+func (q qwenEmbedder) Dim() int { return qwenDim }
+
+func (q qwenEmbedder) Embed(ctx context.Context, texts []string) ([]Vector, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(texts) == 0 {
+		return []Vector{}, nil
+	}
+	if len(texts) > MaxForwardBatch {
+		return nil, fmt.Errorf("embed: batch %d exceeds %d, refusing to keep that many vectors in memory", len(texts), MaxForwardBatch)
+	}
+	argv, err := q.command()
 	if err != nil {
 		return nil, err
 	}
-	// 没有进程内前向实现时 load 返回错误，模型闸不会把嵌入模型留下。
-	// 因此重排模型不会和它同时驻留，也不会去下载权重。
-	return nil, GuardLocalModel(localEmbedKind, func() error {
-		return fmt.Errorf("embed: qwen weights %q have no in-process runtime, refusing to download", weight)
+	payload, err := json.Marshal(struct {
+		Task     string   `json:"task"`
+		ModelDir string   `json:"model_dir"`
+		Dim      int      `json:"dim"`
+		Texts    []string `json:"texts"`
+	}{
+		Task:     "embed",
+		ModelDir: q.dir,
+		Dim:      qwenDim,
+		Texts:    texts,
 	})
+	if err != nil {
+		return nil, err
+	}
+	out, err := RunLocalProcess(ctx, KindEmbed, argv, payload)
+	if err != nil {
+		return nil, err
+	}
+	var parsed struct {
+		Vectors [][]float32 `json:"vectors"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		return nil, fmt.Errorf("embed: qwen forward output: %w", err)
+	}
+	if len(parsed.Vectors) != len(texts) {
+		return nil, fmt.Errorf("embed: qwen forward returned %d vectors for %d texts", len(parsed.Vectors), len(texts))
+	}
+	vecs := make([]Vector, len(parsed.Vectors))
+	for i, row := range parsed.Vectors {
+		if len(row) != qwenDim {
+			return nil, fmt.Errorf("embed: qwen vector %d has length %d, want %d, refusing to change dimension", i, len(row), qwenDim)
+		}
+		vecs[i] = row
+	}
+	return vecs, nil
+}
+
+func (q qwenEmbedder) command() ([]string, error) {
+	if len(q.argv) > 0 {
+		return q.argv, nil
+	}
+	return PythonCommand("qwen_forward.py", qwenForwardScript)
 }
 
 func readHiddenSize(dir string) (int, error) {
