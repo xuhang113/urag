@@ -356,7 +356,7 @@ const askHTML = `{{define "ask"}}
 {{end}}`
 
 const tryHTML = `{{define "try"}}
-<p>只查集合 {{.Try.Collection}}。磁盘向量和这个集合的 BM25 合并后留下前 50 条。嵌入模型在这个试查进程里只加载一次，后面的提问直接用已经在内存里的模型。重排模型不和嵌入模型一起留下；内存放不下两个模型时，重排用分数门槛。分数高于门槛才显示，最多 8 条。下面按这次查询的实际顺序显示步骤，进行中的一步标成未完成。</p>
+<p>只查集合 {{.Try.Collection}}。磁盘向量和这个集合的 BM25 合并后留下前 50 条。嵌入模型在这个试查进程里只加载一次，后面的提问直接用已经在内存里的模型。重排模型不和嵌入模型一起留下；内存放不下两个模型时，重排用分数门槛。分数高于门槛才显示，最多 8 条。下面按这次查询的实际顺序显示步骤。每一行有开始时间、结束时间和耗时（秒），时间是本机本地时间，精确到秒。进行中的一步有开始时间，没有结束时间，并标成未完成。</p>
 <form id="try-form">
 <label for="query">问题</label>
 <input id="query" name="query" required>
@@ -382,7 +382,17 @@ const tryHTML = `{{define "try"}}
       log.appendChild(li);
     }
     li.className = step.done ? "done" : "pending";
-    li.textContent = step.name + (step.done ? " 完成" : " 未完成");
+    var text = step.name + (step.done ? " 完成" : " 未完成");
+    if (step.started) {
+      text += " 开始 " + step.started;
+    }
+    if (step.ended) {
+      text += " 结束 " + step.ended;
+    }
+    if (step.done && step.seconds != null) {
+      text += " 耗时 " + step.seconds + " 秒";
+    }
+    li.textContent = text;
   }
   function showHits(hits) {
     result.textContent = "";

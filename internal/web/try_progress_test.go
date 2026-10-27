@@ -42,6 +42,11 @@ func TestTryStreamKeepsLaterStagesUnfinished(t *testing.T) {
 	if strings.Contains(body.String(), `"done":true`) {
 		t.Fatalf("a step was marked done before the embedder ran\n%s", body.String())
 	}
+	openLoad := latestStep(t, body.String(), retrieve.StepLoadEmbed)
+	if openLoad.Done || openLoad.Ended != "" || openLoad.Seconds != nil {
+		t.Fatalf("open step has an end: %+v", openLoad)
+	}
+	assertLocalSecond(t, openLoad.Started)
 
 	emb.next <- struct{}{}
 	waitPhase(t, ctx, emb.phase, "loaded")
@@ -67,7 +72,7 @@ func TestTryStreamKeepsLaterStagesUnfinished(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
-	assertStepOrder(t, body.String(), []string{
+	finished := []string{
 		retrieve.StepLoadEmbed,
 		retrieve.StepQueryVector,
 		retrieve.StepUnloadEmbed,
@@ -78,7 +83,15 @@ func TestTryStreamKeepsLaterStagesUnfinished(t *testing.T) {
 		retrieve.StepRerank,
 		retrieve.StepFilter(retrieve.DefaultRerankMinScore),
 		retrieve.StepParents,
-	})
+	}
+	assertStepOrder(t, body.String(), finished)
+	doneLoad := latestStep(t, body.String(), retrieve.StepLoadEmbed)
+	if doneLoad.Started != openLoad.Started {
+		t.Fatalf("start changed from %s to %s", openLoad.Started, doneLoad.Started)
+	}
+	for _, name := range finished {
+		assertFinishedStep(t, latestStep(t, body.String(), name))
+	}
 	if !strings.Contains(body.String(), "父节正文") || !strings.Contains(body.String(), `"collection_id":"public"`) {
 		t.Fatalf("result %s", body.String())
 	}
@@ -107,7 +120,29 @@ func TestTryStreamTimeoutLeavesStepOpen(t *testing.T) {
 	if !strings.Contains(text, `"name":"加载嵌入模型","done":false`) {
 		t.Fatalf("load step missing\n%s", text)
 	}
+	openLoad := latestStep(t, text, retrieve.StepLoadEmbed)
+	if openLoad.Done || openLoad.Ended != "" || openLoad.Seconds != nil {
+		t.Fatalf("timed out step has an end: %+v", openLoad)
+	}
+	assertLocalSecond(t, openLoad.Started)
 	waitDone(t, emb.done)
+}
+
+func TestStepClockUsesLocalSeconds(t *testing.T) {
+	start := time.Date(2026, 10, 27, 22, 34, 1, 800000000, time.Local)
+	end := time.Date(2026, 10, 27, 22, 34, 8, 100000000, time.Local)
+	if got := formatStepTime(start); got != "2026-10-27 22:34:01" {
+		t.Fatalf("start %s", got)
+	}
+	if got := formatStepTime(end); got != "2026-10-27 22:34:08" {
+		t.Fatalf("end %s", got)
+	}
+	if got := stepSeconds(start, end); got != 7 {
+		t.Fatalf("seconds %d", got)
+	}
+	if got := stepSeconds(start, start.Add(100*time.Millisecond)); got != 0 {
+		t.Fatalf("same second %d", got)
+	}
 }
 
 func publicTryHandler(t *testing.T, emb embed.Embedder, passages retrieve.PassageReranker, min float64) http.Handler {
@@ -210,6 +245,78 @@ func waitText(t *testing.T, ctx context.Context, body *lockedBuffer, frag string
 			t.Fatalf("missing %s\n%s", frag, body.String())
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+}
+
+func latestStep(t *testing.T, body, name string) stepEvent {
+	t.Helper()
+	var found stepEvent
+	ok := false
+	for _, ev := range parseStepEvents(t, body) {
+		if ev.Name == name {
+			found = ev
+			ok = true
+		}
+	}
+	if !ok {
+		t.Fatalf("missing step %s\n%s", name, body)
+	}
+	return found
+}
+
+func parseStepEvents(t *testing.T, body string) []stepEvent {
+	t.Helper()
+	var out []stepEvent
+	for _, part := range strings.Split(body, "\n\n") {
+		if !strings.Contains(part, "event: step") {
+			continue
+		}
+		var data string
+		for _, line := range strings.Split(part, "\n") {
+			if strings.HasPrefix(line, "data:") {
+				data = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			}
+		}
+		var ev stepEvent
+		if err := json.Unmarshal([]byte(data), &ev); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+func assertLocalSecond(t *testing.T, text string) {
+	t.Helper()
+	got, err := time.ParseInLocation(stepTimeLayout, text, time.Local)
+	if err != nil {
+		t.Fatalf("time %q: %v", text, err)
+	}
+	now := time.Now()
+	if got.Before(now.Add(-30*time.Second)) || got.After(now.Add(2*time.Second)) {
+		t.Fatalf("time %s is not local now %s", text, formatStepTime(now))
+	}
+}
+
+func assertFinishedStep(t *testing.T, ev stepEvent) {
+	t.Helper()
+	if !ev.Done || ev.Started == "" || ev.Ended == "" || ev.Seconds == nil {
+		t.Fatalf("finished step missing clock: %+v", ev)
+	}
+	started, err := time.ParseInLocation(stepTimeLayout, ev.Started, time.Local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended, err := time.ParseInLocation(stepTimeLayout, ev.Ended, time.Local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := int(ended.Sub(started) / time.Second)
+	if want < 0 {
+		t.Fatalf("end before start: %+v", ev)
+	}
+	if *ev.Seconds != want {
+		t.Fatalf("seconds %d want %d for %+v", *ev.Seconds, want, ev)
 	}
 }
 
@@ -356,7 +463,7 @@ func TestTryKeepsEmbedAndSkipsSecondModel(t *testing.T) {
 	if err := readTryStream(ctx, srv.URL+"/api/try", "crimson lantern", first); err != nil {
 		t.Fatal(err)
 	}
-	assertStepOrder(t, first.String(), []string{
+	firstSteps := []string{
 		retrieve.StepLoadEmbed,
 		retrieve.StepQueryVector,
 		retrieve.StepVectorSearch,
@@ -366,7 +473,11 @@ func TestTryKeepsEmbedAndSkipsSecondModel(t *testing.T) {
 		retrieve.StepRerank,
 		retrieve.StepFilter(retrieve.DefaultRerankMinScore),
 		retrieve.StepParents,
-	})
+	}
+	assertStepOrder(t, first.String(), firstSteps)
+	for _, name := range firstSteps {
+		assertFinishedStep(t, latestStep(t, first.String(), name))
+	}
 	if strings.Contains(first.String(), retrieve.StepEmbedResident) || strings.Contains(first.String(), retrieve.StepUnloadEmbed) || strings.Contains(first.String(), retrieve.StepLoadRerank) {
 		t.Fatalf("first query reloaded or unloaded embed\n%s", first.String())
 	}
@@ -378,7 +489,7 @@ func TestTryKeepsEmbedAndSkipsSecondModel(t *testing.T) {
 	if err := readTryStream(ctx, srv.URL+"/api/try", "crimson lantern", second); err != nil {
 		t.Fatal(err)
 	}
-	assertStepOrder(t, second.String(), []string{
+	secondSteps := []string{
 		retrieve.StepEmbedResident,
 		retrieve.StepQueryVector,
 		retrieve.StepVectorSearch,
@@ -387,7 +498,11 @@ func TestTryKeepsEmbedAndSkipsSecondModel(t *testing.T) {
 		retrieve.StepRerank,
 		retrieve.StepFilter(retrieve.DefaultRerankMinScore),
 		retrieve.StepParents,
-	})
+	}
+	assertStepOrder(t, second.String(), secondSteps)
+	for _, name := range secondSteps {
+		assertFinishedStep(t, latestStep(t, second.String(), name))
+	}
 	if strings.Contains(second.String(), retrieve.StepLoadEmbed) || strings.Contains(second.String(), retrieve.StepParkEmbed) || strings.Contains(second.String(), retrieve.StepLoadRerank) {
 		t.Fatalf("second query reloaded embed or rerank\n%s", second.String())
 	}

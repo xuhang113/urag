@@ -431,6 +431,12 @@ func TestPageTry(t *testing.T) {
 	if !strings.Contains(body, `id="try-log"`) || !strings.Contains(body, "未完成") || !strings.Contains(body, "text/event-stream") {
 		t.Fatalf("try page missing progress log: %s", body)
 	}
+	if !strings.Contains(body, "开始时间") || !strings.Contains(body, "结束时间") || !strings.Contains(body, "耗时") {
+		t.Fatalf("try page missing step times: %s", body)
+	}
+	if !strings.Contains(body, "step.started") || !strings.Contains(body, "step.ended") || !strings.Contains(body, "step.seconds") {
+		t.Fatalf("try page does not render step times: %s", body)
+	}
 	if !strings.Contains(body, "只加载一次") {
 		t.Fatalf("try page missing resident embed: %s", body)
 	}

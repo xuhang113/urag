@@ -8,16 +8,21 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/xuhang113/urag/internal/retrieve"
 )
+
+// stepTimeLayout 是试查步骤在页面上的本机本地时间，精确到秒。
+const stepTimeLayout = "2006-01-02 15:04:05"
 
 func wantsTryStream(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), "text/event-stream")
 }
 
 // streamTry 在同一次查询里按真实顺序写出阶段。
-// 阶段没做完时 done 为 false。查询结束、超时或失败都不再把后面的步骤补成完成。
+// 每个阶段带本机本地时间的开始时刻。完成时再带结束时刻和整秒耗时。
+// 阶段没做完时 done 为 false，没有结束时间。查询结束、超时或失败都不再把后面的步骤补成完成。
 func (s *server) streamTry(w http.ResponseWriter, r *http.Request, query string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -125,24 +130,77 @@ func writeFrames(w http.ResponseWriter, flusher http.Flusher, frames [][]byte) b
 }
 
 type liveLog struct {
-	mu   sync.Mutex
-	buf  [][]byte
-	wake chan struct{}
+	mu     sync.Mutex
+	buf    [][]byte
+	wake   chan struct{}
+	clocks map[string]stepClock
+}
+
+type stepClock struct {
+	started time.Time
+	ended   time.Time
 }
 
 func newLiveLog() *liveLog {
-	return &liveLog{wake: make(chan struct{}, 1)}
+	return &liveLog{wake: make(chan struct{}, 1), clocks: map[string]stepClock{}}
 }
 
 func (l *liveLog) step(name string, done bool) {
-	raw, err := json.Marshal(struct {
-		Name string `json:"name"`
-		Done bool   `json:"done"`
-	}{Name: name, Done: done})
+	now := time.Now()
+	l.mu.Lock()
+	clock := l.clocks[name]
+	if clock.started.IsZero() {
+		clock.started = now
+	}
+	if done && clock.ended.IsZero() {
+		clock.ended = now
+	}
+	l.clocks[name] = clock
+	l.mu.Unlock()
+
+	ev := stepEvent{
+		Name:    name,
+		Done:    done,
+		Started: formatStepTime(clock.started),
+	}
+	if done {
+		ev.Ended = formatStepTime(clock.ended)
+		sec := stepSeconds(clock.started, clock.ended)
+		ev.Seconds = &sec
+	}
+	raw, err := json.Marshal(ev)
 	if err != nil {
 		return
 	}
 	l.add(fmt.Sprintf("event: step\ndata: %s\n\n", raw))
+}
+
+// stepEvent 是页面上的一行步骤。字段顺序让已有断言仍能对上 name 和 done。
+// 进行中的步骤只有 started。完成时才有 ended 和 seconds。
+type stepEvent struct {
+	Name    string `json:"name"`
+	Done    bool   `json:"done"`
+	Started string `json:"started"`
+	Ended   string `json:"ended,omitempty"`
+	Seconds *int   `json:"seconds,omitempty"`
+}
+
+func formatStepTime(t time.Time) string {
+	return t.In(time.Local).Format(stepTimeLayout)
+}
+
+// stepSeconds 是两个时刻按本机本地时间截到秒之后的差，单位是秒。
+func stepSeconds(start, end time.Time) int {
+	sec := int(wallSecond(end).Sub(wallSecond(start)) / time.Second)
+	if sec < 0 {
+		return 0
+	}
+	return sec
+}
+
+func wallSecond(t time.Time) time.Time {
+	t = t.In(time.Local)
+	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, time.Local)
 }
 
 func (l *liveLog) add(frame string) {
