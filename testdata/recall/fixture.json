@@ -1,0 +1,110 @@
+{
+  "k": 5,
+  "thresholds": {
+    "normal_recall_at_k": 0.8,
+    "normal_mrr": 0.6,
+    "contrast_recall_at_k_max": 0.4
+  },
+  "contrast_drop_terms": [
+    "crimson",
+    "lantern",
+    "festival",
+    "amber",
+    "canal",
+    "barge",
+    "municipal",
+    "library",
+    "catalogs",
+    "silver",
+    "harbor",
+    "crane",
+    "violet",
+    "night",
+    "market"
+  ],
+  "collections": [
+    {
+      "id": "alpha",
+      "documents": [
+        {
+          "id": "alpha-lantern",
+          "text": "The crimson lantern festival is held on the east stone bridge every spring. Visitors carry paper lanterns across the east stone bridge."
+        },
+        {
+          "id": "alpha-canal",
+          "text": "The amber canal barge carries grain under the north warehouse arch."
+        },
+        {
+          "id": "alpha-library",
+          "text": "The quiet municipal library stores card catalogs in oak drawers."
+        }
+      ]
+    },
+    {
+      "id": "beta",
+      "documents": [
+        {
+          "id": "beta-harbor",
+          "text": "The silver harbor crane loads cedar crates at dawn."
+        },
+        {
+          "id": "beta-market",
+          "text": "The violet night market sells glass spices beside the clock tower."
+        }
+      ]
+    },
+    {
+      "id": "gamma",
+      "documents": [
+        {
+          "id": "gamma-secret",
+          "text": "The hidden obsidian vault keeps the gamma only token."
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-lantern",
+      "collections": ["alpha"],
+      "query": "crimson lantern festival",
+      "relevant_docs": ["alpha-lantern"]
+    },
+    {
+      "id": "q-canal",
+      "collections": ["alpha"],
+      "query": "amber canal barge",
+      "relevant_docs": ["alpha-canal"]
+    },
+    {
+      "id": "q-library",
+      "collections": ["alpha"],
+      "query": "municipal library catalogs",
+      "relevant_docs": ["alpha-library"]
+    },
+    {
+      "id": "q-harbor",
+      "collections": ["beta"],
+      "query": "silver harbor crane",
+      "relevant_docs": ["beta-harbor"]
+    },
+    {
+      "id": "q-market",
+      "collections": ["beta"],
+      "query": "violet night market",
+      "relevant_docs": ["beta-market"]
+    },
+    {
+      "id": "m-lantern",
+      "collections": ["alpha", "beta"],
+      "query": "crimson lantern festival",
+      "relevant_docs": ["alpha-lantern"]
+    },
+    {
+      "id": "m-harbor",
+      "collections": ["alpha", "beta"],
+      "query": "silver harbor crane",
+      "relevant_docs": ["beta-harbor"]
+    }
+  ]
+}
