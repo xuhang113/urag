@@ -14,23 +14,25 @@ import (
 const publicCollection model.CollectionID = "public"
 
 // Try 只在集合 public 里做磁盘向量检索和该集合的 BM25。
-// 合并后留下前 50 条子块，重排后最多 8 条，再丢掉没有高于 RerankMinScore 的命中。
-// 可以返回 0 条。KeepEmbed 时嵌入进程留到试查进程结束，提问结束不关掉它。
+// 合并后留下前 50 条子块，再留下最多 8 条。
+// 第二个返回值表示这些分数来自重排器。只有这时才丢掉没有高于 RerankMinScore 的命中，可以返回 0 条。
+// 没有重排分时按混合分返回这最多 8 条，不套门槛。
+// KeepEmbed 时嵌入进程留到试查进程结束，提问结束不关掉它。
 // 否则嵌入器若能 Close，会在查询向量返回前关掉，然后再做向量检索和重排。
-// 嵌入进程还在时不启动重排模型，重排用已有分数门槛。
-// 重排后先按 RerankMinScore 丢掉低分，再取父块。ctx 取消或到点时，这些步骤一起停。
+// 嵌入进程还在时不启动重排模型。重排后若有重排分，先按 RerankMinScore 丢掉低分，再取父块。
+// ctx 取消或到点时，这些步骤一起停。
 // 其它集合不会被打开。query 空白时返回错误。
 // 夹具评价不走这里。
-func (p *Pipeline) Try(ctx context.Context, query string) ([]retrieve.Hit, error) {
+func (p *Pipeline) Try(ctx context.Context, query string) ([]retrieve.Hit, bool, error) {
 	if p == nil || p.deps.Embedder == nil || p.deps.Registry == nil {
-		return nil, errMissingDeps
+		return nil, false, errMissingDeps
 	}
 	query = strings.TrimSpace(query)
 	if query == "" {
-		return nil, errors.New("job: query required")
+		return nil, false, errors.New("job: query required")
 	}
 	if p.deps.Passages == nil {
-		return nil, errors.New("job: nil reranker")
+		return nil, false, errors.New("job: nil reranker")
 	}
 	p.tryMu.Lock()
 	defer p.tryMu.Unlock()
@@ -50,24 +52,28 @@ func (p *Pipeline) Try(ctx context.Context, query string) ([]retrieve.Hit, error
 		emb = retrieve.ReleaseOnEmbed(emb, closer.Close)
 	}
 	svc := retrieve.New(p.deps.Registry, emb, p.cfg.Weights, nil)
+	ctx = retrieve.WithRerankScores(ctx)
 	hits, err := svc.RetrieveChildren(ctx, retrieve.Request{
 		Collections: []model.CollectionID{publicCollection},
 		Query:       query,
 	}, p.deps.Passages, nil)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	filter := retrieve.StepFilter(p.cfg.RerankMinScore)
-	retrieve.Report(ctx, filter, false)
-	hits = retrieve.KeepAboveRerankScore(hits, p.cfg.RerankMinScore)
-	retrieve.Report(ctx, filter, true)
+	reranked := retrieve.HasRerankScores(ctx)
+	if reranked {
+		filter := retrieve.StepFilter(p.cfg.RerankMinScore)
+		retrieve.Report(ctx, filter, false)
+		hits = retrieve.KeepAboveRerankScore(hits, p.cfg.RerankMinScore)
+		retrieve.Report(ctx, filter, true)
+	}
 	retrieve.Report(ctx, retrieve.StepParents, false)
 	hits, err = retrieve.FillParents(ctx, hits, p.deps.Parents)
 	if err != nil {
-		return nil, err
+		return nil, reranked, err
 	}
 	retrieve.Report(ctx, retrieve.StepParents, true)
-	return hits, nil
+	return hits, reranked, nil
 }
 
 // parkEmbedForRerank 只在第一次重排前写下取舍。

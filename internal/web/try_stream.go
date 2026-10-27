@@ -16,6 +16,10 @@ import (
 // stepTimeLayout 是试查步骤在页面上的本机本地时间，精确到秒。
 const stepTimeLayout = "2006-01-02 15:04:05"
 
+// noRerankFilterNote 是这次没有重排分时页面上的说明。
+// 混合分不套 URAG_RERANK_MIN_SCORE。句子里的 0.5 是该门槛的默认值。
+const noRerankFilterNote = "本次没有重排分，未按 0.5 过滤"
+
 func wantsTryStream(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), "text/event-stream")
 }
@@ -43,13 +47,14 @@ func (s *server) streamTry(w http.ResponseWriter, r *http.Request, query string)
 	log := newLiveLog()
 	ctx = retrieve.WithProgress(ctx, log.step)
 	type outcome struct {
-		hits []retrieve.Hit
-		err  error
+		hits     []retrieve.Hit
+		reranked bool
+		err      error
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		hits, err := s.p.Try(ctx, query)
-		done <- outcome{hits: hits, err: err}
+		hits, reranked, err := s.p.Try(ctx, query)
+		done <- outcome{hits: hits, reranked: reranked, err: err}
 	}()
 	for {
 		if !writeFrames(w, flusher, log.take()) {
@@ -62,7 +67,7 @@ func (s *server) streamTry(w http.ResponseWriter, r *http.Request, query string)
 			if !writeFrames(w, flusher, log.take()) {
 				return
 			}
-			writeTryOutcome(w, flusher, ctx, got.hits, got.err)
+			writeTryOutcome(w, flusher, ctx, got.hits, got.reranked, got.err)
 			return
 		case <-ctx.Done():
 			select {
@@ -70,7 +75,7 @@ func (s *server) streamTry(w http.ResponseWriter, r *http.Request, query string)
 				if !writeFrames(w, flusher, log.take()) {
 					return
 				}
-				writeTryOutcome(w, flusher, ctx, got.hits, got.err)
+				writeTryOutcome(w, flusher, ctx, got.hits, got.reranked, got.err)
 			default:
 				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 					_ = writeFrames(w, flusher, [][]byte{errorFrame(tryTimeoutText)})
@@ -81,7 +86,7 @@ func (s *server) streamTry(w http.ResponseWriter, r *http.Request, query string)
 	}
 }
 
-func writeTryOutcome(w http.ResponseWriter, flusher http.Flusher, ctx context.Context, hits []retrieve.Hit, err error) {
+func writeTryOutcome(w http.ResponseWriter, flusher http.Flusher, ctx context.Context, hits []retrieve.Hit, reranked bool, err error) {
 	if err != nil {
 		if errors.Is(err, context.Canceled) && !tryTimedOut(ctx, err) {
 			return
@@ -96,9 +101,14 @@ func writeTryOutcome(w http.ResponseWriter, flusher http.Flusher, ctx context.Co
 	if hits == nil {
 		hits = []retrieve.Hit{}
 	}
+	note := ""
+	if !reranked {
+		note = noRerankFilterNote
+	}
 	raw, marshalErr := json.Marshal(struct {
 		Hits []retrieve.Hit `json:"hits"`
-	}{Hits: hits})
+		Note string         `json:"note,omitempty"`
+	}{Hits: hits, Note: note})
 	if marshalErr != nil {
 		_ = writeFrames(w, flusher, [][]byte{errorFrame("检索失败")})
 		return

@@ -148,6 +148,55 @@ func rerankPlanFrom(ctx context.Context) (RerankPlan, bool) {
 	return plan, ok
 }
 
+// rerankScoreBox 记录这次查询的重排器是否返回了分数。
+// 只复制混合分时不记。试查用它决定要不要套分数门槛。
+type rerankScoreBox struct {
+	mu  sync.Mutex
+	got bool
+}
+
+type rerankScoreKey struct{}
+
+// WithRerankScores 让这次查询可以记下重排器是否返回了分数。
+// 已经放过时返回原上下文，方便调用方和检索共用同一个标记。
+func WithRerankScores(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, ok := ctx.Value(rerankScoreKey{}).(*rerankScoreBox); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, rerankScoreKey{}, &rerankScoreBox{})
+}
+
+func markRerankScores(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	box, _ := ctx.Value(rerankScoreKey{}).(*rerankScoreBox)
+	if box == nil {
+		return
+	}
+	box.mu.Lock()
+	box.got = true
+	box.mu.Unlock()
+}
+
+// HasRerankScores 报告这次查询的重排器是否返回了分数。
+// 没有用 WithRerankScores 准备过，或只沿用了混合分时，返回 false。
+func HasRerankScores(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	box, _ := ctx.Value(rerankScoreKey{}).(*rerankScoreBox)
+	if box == nil {
+		return false
+	}
+	box.mu.Lock()
+	defer box.mu.Unlock()
+	return box.got
+}
+
 func noteModelStep(ctx context.Context, token string) {
 	switch token {
 	case "load_embed_done":

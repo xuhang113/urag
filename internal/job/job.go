@@ -150,15 +150,17 @@ type Config struct {
 	Inline            bool
 	UploadConcurrency int
 	CrawlCheckpoint   string
-	// RerankMinScore 是试查页和 urag search 的重排分数门槛。
-	// 命中必须高于它才返回。生产进程从 URAG_RERANK_MIN_SCORE 读入，未设置时用 retrieve.DefaultRerankMinScore。
+	// RerankMinScore 是重排分数门槛。
+	// 试查只有真正拿到重排分时才用它。没有重排分时按混合分返回，不套这道门槛。
+	// urag search 先重排再套它。生产进程从 URAG_RERANK_MIN_SCORE 读入，未设置时用 retrieve.DefaultRerankMinScore。
 	// 夹具评价走 Ask，不读这个字段。
 	RerankMinScore float64
 	// KeepEmbed 为 true 时，试查不在每次提问后关掉嵌入进程。
 	// urag try 在进程活着期间只加载一次嵌入模型。
 	KeepEmbed bool
 	// ParkEmbed 为 true 时，内存放不下嵌入和重排两个模型。
-	// 第一次重排前写一次取舍，之后的提问不再写。重排用已有分数门槛。
+	// 第一次需要重排前写一次取舍，之后的提问不再写。
+	// 这次没有重排分，试查按混合分返回。
 	ParkEmbed bool
 }
 

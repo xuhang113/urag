@@ -177,7 +177,7 @@ func (s *server) apiTry(w http.ResponseWriter, r *http.Request) {
 	}
 	done := make(chan tryOutcome, 1)
 	go func() {
-		hits, err := s.p.Try(ctx, in.Query)
+		hits, _, err := s.p.Try(ctx, in.Query)
 		done <- tryOutcome{hits: hits, err: err}
 	}()
 	select {

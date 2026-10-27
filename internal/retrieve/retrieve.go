@@ -266,7 +266,8 @@ func sortHits(hits []Hit) {
 // 子块嵌入文本是 heading_path + "\n" + body；标题路径为空时只有 body。
 // 重排只产出分数。parents 为 nil，或父块查不到时，Hit.Text 保持子块 body。
 // 未点名的集合不会被打开。不使用服务里原来的 Reranker。
-// 嵌入进程还占着模型闸时，不启动重排模型，沿用合并后的分数。
+// 嵌入进程还占着模型闸时，不启动重排模型，沿用合并后的混合分。
+// 只有重排器真正返回分数时，才用 WithRerankScores 记下。调用方据此决定要不要套门槛。
 func (s *service) RetrieveChildren(ctx context.Context, req Request, rerank PassageReranker, parents ParentLookup) ([]Hit, error) {
 	if s == nil {
 		return nil, errors.New("retrieve: nil service")
@@ -429,12 +430,11 @@ func (s *service) scoreChildren(ctx context.Context, rerank PassageReranker, que
 		if plan.Park != nil {
 			plan.Park(ctx)
 		}
-		Report(ctx, StepRerank, false)
+		// 没有启动重排模型，分数仍是混合分。不把这一步记成重排完成。
 		scores := make([]float64, len(merged))
 		for i := range merged {
 			scores[i] = merged[i].Score
 		}
-		Report(ctx, StepRerank, true)
 		return scores, nil
 	}
 	if len(passages) > 0 {
@@ -443,6 +443,9 @@ func (s *service) scoreChildren(ctx context.Context, rerank PassageReranker, que
 	scores, err := rerank.Score(ctx, queryText, passages)
 	if err != nil {
 		return nil, err
+	}
+	if len(passages) > 0 {
+		markRerankScores(ctx)
 	}
 	if len(passages) > 0 && !StepDone(ctx, StepRerank) {
 		Report(ctx, StepLoadRerank, true)

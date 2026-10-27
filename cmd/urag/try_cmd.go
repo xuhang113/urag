@@ -62,7 +62,7 @@ func tryPage(args []string) error {
 	if err != nil {
 		return err
 	}
-	// 查询向量用常驻嵌入。内存不够再放一个 4B 时，重排用已有分数门槛。
+	// 查询向量用常驻嵌入。嵌入进程还在时不启动重排模型，试查按混合分返回。
 	cfg.KeepEmbed = true
 	cfg.ParkEmbed = !secondModelFits()
 	reg, err := index.NewDisk(root, qwenMeta)

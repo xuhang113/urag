@@ -356,7 +356,7 @@ const askHTML = `{{define "ask"}}
 {{end}}`
 
 const tryHTML = `{{define "try"}}
-<p>只查集合 {{.Try.Collection}}。磁盘向量和这个集合的 BM25 合并后留下前 50 条。嵌入模型在这个试查进程里只加载一次，后面的提问直接用已经在内存里的模型。重排模型不和嵌入模型一起留下；内存放不下两个模型时，重排用分数门槛。分数高于门槛才显示，最多 8 条。下面按这次查询的实际顺序显示步骤。每一行有开始时间、结束时间和耗时（秒），时间是本机本地时间，精确到秒。进行中的一步有开始时间，没有结束时间，并标成未完成。</p>
+<p>只查集合 {{.Try.Collection}}。磁盘向量和这个集合的 BM25 合并后留下前 50 条。嵌入模型在这个试查进程里只加载一次，后面的提问直接用已经在内存里的模型。重排模型不和嵌入模型一起留下。只有拿到重排分时才按分数门槛过滤，最多 8 条。没有重排分时按混合分返回最多 8 条，每条显示分数。下面按这次查询的实际顺序显示步骤。每一行有开始时间、结束时间和耗时（秒），时间是本机本地时间，精确到秒。进行中的一步有开始时间，没有结束时间，并标成未完成。</p>
 <form id="try-form">
 <label for="query">问题</label>
 <input id="query" name="query" required>
@@ -364,6 +364,7 @@ const tryHTML = `{{define "try"}}
 </form>
 <ol id="try-log"></ol>
 <p id="try-status"></p>
+<p id="try-note"></p>
 <p id="try-error" class="err"></p>
 <div id="try-result"></div>
 <script>
@@ -394,10 +395,14 @@ const tryHTML = `{{define "try"}}
     }
     li.textContent = text;
   }
-  function showHits(hits) {
+  function showHits(hits, note) {
     result.textContent = "";
+    var noteEl = document.getElementById("try-note");
+    if (noteEl) {
+      noteEl.textContent = note || "";
+    }
     if (!hits || !hits.length) {
-      status.textContent = "没有足够相关的片段";
+      status.textContent = note ? "命中 0 条" : "没有足够相关的片段";
       return;
     }
     status.textContent = "命中 " + hits.length + " 条";
@@ -444,7 +449,7 @@ const tryHTML = `{{define "try"}}
       return;
     }
     if (eventName === "result") {
-      showHits(payload.hits || []);
+      showHits(payload.hits || [], payload.note || "");
       return;
     }
     if (eventName === "error") {
@@ -458,6 +463,10 @@ const tryHTML = `{{define "try"}}
     err.textContent = "";
     result.textContent = "";
     status.textContent = "";
+    var noteEl = document.getElementById("try-note");
+    if (noteEl) {
+      noteEl.textContent = "";
+    }
     log.textContent = "";
     items = {};
     var timeoutText = "检索超时。收录正在占用嵌入模型，这次没有结果。";

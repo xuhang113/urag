@@ -95,6 +95,9 @@ func TestTryStreamKeepsLaterStagesUnfinished(t *testing.T) {
 	if !strings.Contains(body.String(), "父节正文") || !strings.Contains(body.String(), `"collection_id":"public"`) {
 		t.Fatalf("result %s", body.String())
 	}
+	if strings.Contains(body.String(), noRerankFilterNote) {
+		t.Fatalf("reranked query said there was no rerank score\n%s", body.String())
+	}
 }
 
 func TestTryStreamTimeoutLeavesStepOpen(t *testing.T) {
@@ -470,18 +473,16 @@ func TestTryKeepsEmbedAndSkipsSecondModel(t *testing.T) {
 		retrieve.StepBM25,
 		retrieve.StepMergeTop50,
 		retrieve.StepParkEmbed,
-		retrieve.StepRerank,
-		retrieve.StepFilter(retrieve.DefaultRerankMinScore),
 		retrieve.StepParents,
 	}
 	assertStepOrder(t, first.String(), firstSteps)
 	for _, name := range firstSteps {
 		assertFinishedStep(t, latestStep(t, first.String(), name))
 	}
-	if strings.Contains(first.String(), retrieve.StepEmbedResident) || strings.Contains(first.String(), retrieve.StepUnloadEmbed) || strings.Contains(first.String(), retrieve.StepLoadRerank) {
-		t.Fatalf("first query reloaded or unloaded embed\n%s", first.String())
+	if strings.Contains(first.String(), retrieve.StepEmbedResident) || strings.Contains(first.String(), retrieve.StepUnloadEmbed) || strings.Contains(first.String(), retrieve.StepLoadRerank) || strings.Contains(first.String(), `"name":"`+retrieve.StepRerank+`"`) || strings.Contains(first.String(), retrieve.StepFilter(retrieve.DefaultRerankMinScore)) {
+		t.Fatalf("first query reranked or filtered hybrid scores\n%s", first.String())
 	}
-	if !strings.Contains(first.String(), `"collection_id":"public"`) {
+	if !strings.Contains(first.String(), `"collection_id":"public"`) || !strings.Contains(first.String(), noRerankFilterNote) || !strings.Contains(first.String(), `"score":`) {
 		t.Fatalf("result %s", first.String())
 	}
 
@@ -495,16 +496,17 @@ func TestTryKeepsEmbedAndSkipsSecondModel(t *testing.T) {
 		retrieve.StepVectorSearch,
 		retrieve.StepBM25,
 		retrieve.StepMergeTop50,
-		retrieve.StepRerank,
-		retrieve.StepFilter(retrieve.DefaultRerankMinScore),
 		retrieve.StepParents,
 	}
 	assertStepOrder(t, second.String(), secondSteps)
 	for _, name := range secondSteps {
 		assertFinishedStep(t, latestStep(t, second.String(), name))
 	}
-	if strings.Contains(second.String(), retrieve.StepLoadEmbed) || strings.Contains(second.String(), retrieve.StepParkEmbed) || strings.Contains(second.String(), retrieve.StepLoadRerank) {
+	if strings.Contains(second.String(), retrieve.StepLoadEmbed) || strings.Contains(second.String(), retrieve.StepParkEmbed) || strings.Contains(second.String(), retrieve.StepLoadRerank) || strings.Contains(second.String(), `"name":"`+retrieve.StepRerank+`"`) || strings.Contains(second.String(), retrieve.StepFilter(retrieve.DefaultRerankMinScore)) {
 		t.Fatalf("second query reloaded embed or rerank\n%s", second.String())
+	}
+	if !strings.Contains(second.String(), noRerankFilterNote) || !strings.Contains(second.String(), `"score":`) {
+		t.Fatalf("result %s", second.String())
 	}
 	if rr.n() != 0 {
 		t.Fatalf("rerank model started %d times", rr.n())
@@ -514,7 +516,7 @@ func TestTryKeepsEmbedAndSkipsSecondModel(t *testing.T) {
 	}
 }
 
-func TestResidentTryDropsBelowThreshold(t *testing.T) {
+func TestResidentTryKeepsHybridBelowThreshold(t *testing.T) {
 	emb := &residentEmbedder{inner: embed.NewFixture(8), pid: os.Getpid(), holding: true}
 	rr := &countReranker{}
 	h := residentTryHandler(t, emb, rr, 10, true)
@@ -536,8 +538,11 @@ func TestResidentTryDropsBelowThreshold(t *testing.T) {
 	if err := json.Unmarshal(got.Body.Bytes(), &hits); err != nil {
 		t.Fatal(err)
 	}
-	if len(hits) != 0 {
+	if len(hits) != 1 || hits[0].ChunkID != "c1" || hits[0].CollectionID != "public" {
 		t.Fatalf("hits %+v", hits)
+	}
+	if hits[0].Score <= 0 || hits[0].Score >= 10 {
+		t.Fatalf("hybrid score was filtered or missing: %+v", hits[0])
 	}
 	if rr.n() != 0 || emb.wasClosed() {
 		t.Fatalf("calls %d closed %v", rr.n(), emb.wasClosed())
