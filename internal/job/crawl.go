@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/xuhang113/urag/internal/acquire"
@@ -82,6 +83,8 @@ func (p *Pipeline) executeCrawl(ctx context.Context, rec *jobRecord) error {
 		done++
 		p.setProgress(rec, "crawl", done, total)
 	}
+	logSkipCounts(skips)
+	cleanPDF := 0
 	for _, item := range found {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -91,13 +94,43 @@ func (p *Pipeline) executeCrawl(ctx context.Context, rec *jobRecord) error {
 			p.setProgress(rec, "crawl", done, total)
 			continue
 		}
-		if err := p.ingestFound(ctx, rec, cleaner, item); err != nil {
+		err := p.ingestFound(ctx, rec, cleaner, item)
+		if errors.Is(err, errCleanSkip) {
+			cleanPDF++
+			done++
+			p.setProgress(rec, "crawl", done, total)
+			continue
+		}
+		if err != nil {
 			return err
 		}
 		done++
 		p.setProgress(rec, "crawl", done, total)
 	}
+	fmt.Fprintf(os.Stderr, "清洗跳过 pdf=%d\n", cleanPDF)
 	return nil
+}
+
+// errCleanSkip 表示这篇已写入断点，但不计入合格篇数。调用方不要重试。
+var errCleanSkip = errors.New("job: clean skip")
+
+// ReleaseJob 丢掉已经结束的任务记录。下一批会从磁盘断点继续，不在内存里留下一份断点副本。
+func (p *Pipeline) ReleaseJob(id string) {
+	if p == nil || id == "" {
+		return
+	}
+	p.mu.Lock()
+	delete(p.jobs, id)
+	p.mu.Unlock()
+}
+
+func logSkipCounts(skips []acquire.Skip) {
+	n := map[string]int{}
+	for _, sk := range skips {
+		n[sk.Reason]++
+	}
+	fmt.Fprintf(os.Stderr, "跳过 robots=%d login=%d payment=%d captcha=%d unsupported=%d download=%d\n",
+		n["robots"], n["login"], n["payment"], n["captcha"], n["unsupported"], n["download"])
 }
 
 func (p *Pipeline) ingestFound(ctx context.Context, rec *jobRecord, cleaner clean.Cleaner, item acquire.Found) error {
@@ -125,6 +158,13 @@ func (p *Pipeline) ingestFound(ctx context.Context, rec *jobRecord, cleaner clea
 		}
 		if errors.Is(err, clean.ErrUnsupportedType) {
 			return p.markSource(rec, item.SourceURI)
+		}
+		// 抽不出文字的 PDF 记入断点后继续。否则一份扫描件会让整批停住。
+		if strings.HasPrefix(err.Error(), "clean: pdf:") {
+			if markErr := p.markSource(rec, item.SourceURI); markErr != nil {
+				return markErr
+			}
+			return errCleanSkip
 		}
 		return err
 	}

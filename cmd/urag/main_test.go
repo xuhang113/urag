@@ -22,6 +22,23 @@ func TestReadSeedsSkipsComments(t *testing.T) {
 	}
 }
 
+func TestSplitSeedBatches(t *testing.T) {
+	got := splitSeedBatches([]string{"a", "b", "c", "d", "e"}, 2)
+	if len(got) != 3 || len(got[0]) != 2 || len(got[2]) != 1 || got[2][0] != "e" {
+		t.Fatalf("%v", got)
+	}
+}
+
+func TestRedactDSN(t *testing.T) {
+	got := redact("dial example-user:fake-password@tcp(127.0.0.1:3306)/urag_example?parseTime=true: denied")
+	if strings.Contains(got, "fake-password") || strings.Contains(got, "127.0.0.1") || strings.Contains(got, "urag_example") {
+		t.Fatalf("%s", got)
+	}
+	if !strings.Contains(got, "mysql-dsn-redacted") {
+		t.Fatalf("%s", got)
+	}
+}
+
 func TestCrawlExitsWithoutDSN(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seeds.txt")
 	if err := os.WriteFile(path, []byte("http://127.0.0.1/sitemap.xml\n"), 0o644); err != nil {

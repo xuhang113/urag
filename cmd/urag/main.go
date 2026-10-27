@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -33,10 +34,17 @@ var qwenMeta = embed.ModelMeta{Name: "Qwen/Qwen3-Embedding-4B", Dim: 2560}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(os.Stderr, redact(err.Error()))
 		os.Exit(1)
 	}
 }
+
+// redact 去掉错误文本里的 MySQL 账号口令和主机，避免收录日志写出完整 DSN。
+func redact(msg string) string {
+	return dsnPattern.ReplaceAllString(msg, "mysql-dsn-redacted")
+}
+
+var dsnPattern = regexp.MustCompile(`[^\s:@]+:[^@\s]+@tcp\([^)]*\)(?:/[^\s?]*)?(?:\?[^\s]*)?`)
 
 func run(args []string) error {
 	cmd := "serve"
@@ -125,16 +133,26 @@ func crawl(args []string) error {
 		return err
 	}
 	col := model.CollectionID(envOr("URAG_COLLECTION", "public"))
-	result, err := pipeline.SubmitCrawl(ctx, job.CrawlInput{
-		CollectionID: col,
-		Seeds:        seeds,
-		Limits:       acquire.CrawlLimits{PerHostInterval: time.Second},
-	})
-	if err != nil {
-		if result.Error != "" {
-			return fmt.Errorf("urag: crawl: %s", result.Error)
+	// 每批列完就入库并写下断点。整份种子一起列完才入库时，后面的地址会挡住前面的篇数。
+	for _, batch := range splitSeedBatches(seeds, crawlSeedBatch) {
+		result, err := pipeline.SubmitCrawl(ctx, job.CrawlInput{
+			CollectionID: col,
+			Seeds:        batch,
+			Limits:       acquire.CrawlLimits{PerHostInterval: time.Second},
+		})
+		pipeline.ReleaseJob(result.ID)
+		if err != nil {
+			msg := result.Error
+			if msg == "" {
+				msg = err.Error()
+			}
+			return fmt.Errorf("urag: crawl 停在种子 %s: %s", batch[0], redact(msg))
 		}
-		return err
+		n, err := db.CountIndexed(ctx, string(col))
+		if err != nil {
+			return err
+		}
+		fmt.Printf("收录进行中，集合 %s 篇数 %d\n", col, n)
 	}
 	n, err := db.CountIndexed(ctx, string(col))
 	if err != nil {
@@ -142,6 +160,23 @@ func crawl(args []string) error {
 	}
 	fmt.Printf("收录完成，集合 %s 篇数 %d\n", col, n)
 	return nil
+}
+
+const crawlSeedBatch = 8
+
+func splitSeedBatches(seeds []string, size int) [][]string {
+	if size <= 0 {
+		size = 1
+	}
+	var out [][]string
+	for start := 0; start < len(seeds); start += size {
+		end := start + size
+		if end > len(seeds) {
+			end = len(seeds)
+		}
+		out = append(out, seeds[start:end])
+	}
+	return out
 }
 
 func readSeeds(path string) ([]string, error) {
