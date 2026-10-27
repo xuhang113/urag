@@ -2,9 +2,11 @@ package index
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"sync"
 
 	"github.com/xuhang113/urag/internal/embed"
@@ -12,8 +14,10 @@ import (
 )
 
 type stored struct {
-	chunk model.Chunk
-	vec   embed.Vector
+	chunk    model.Chunk
+	vec      embed.Vector
+	parentID int64
+	heading  string
 }
 
 type memoryIndex struct {
@@ -84,10 +88,16 @@ func (m *memoryIndex) Upsert(ctx context.Context, chunks []model.Chunk, vectors 
 	for i, c := range chunks {
 		vec := make(embed.Vector, len(vectors[i]))
 		copy(vec, vectors[i])
-		if _, ok := m.items[c.ID]; !ok {
+		prev, exists := m.items[c.ID]
+		if !exists {
 			m.order = append(m.order, c.ID)
 		}
-		m.items[c.ID] = stored{chunk: c, vec: vec}
+		m.items[c.ID] = stored{
+			chunk:    c,
+			vec:      vec,
+			parentID: prev.parentID,
+			heading:  prev.heading,
+		}
 	}
 	return nil
 }
@@ -107,8 +117,14 @@ func (m *memoryIndex) SearchKeyword(ctx context.Context, q Query) ([]Hit, error)
 	if err := m.check(ctx, q); err != nil {
 		return nil, err
 	}
+	if q.Rank != "" && q.Rank != RankBM25 {
+		return nil, fmt.Errorf("index: unknown keyword rank %q", q.Rank)
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if q.Rank == RankBM25 {
+		return m.collectBM25(q.Tokens, q.TopK), nil
+	}
 	return m.collect(func(item stored) float64 {
 		return keywordScore(q.Tokens, item.chunk.Text)
 	}, q.TopK), nil
@@ -139,18 +155,140 @@ func (m *memoryIndex) collect(scoreOf func(stored) float64, topK int) []Hit {
 			Chunk:        item.chunk,
 			Score:        score,
 			CollectionID: m.id,
+			ParentID:     item.parentID,
+			HeadingPath:  item.heading,
 		})
 	}
+	sortIndexHits(hits)
+	if len(hits) > topK {
+		hits = hits[:topK]
+	}
+	return hits
+}
+
+func (m *memoryIndex) collectBM25(query []string, topK int) []Hit {
+	if topK <= 0 || len(uniqueTokens(query)) == 0 {
+		return []Hit{}
+	}
+	docs := make([][]string, len(m.order))
+	for i, id := range m.order {
+		docs[i] = embed.Tokens(m.items[id].chunk.Text)
+	}
+	scores := bm25Scores(docs, query)
+	hits := make([]Hit, 0)
+	for i, id := range m.order {
+		score := scores[i]
+		if score <= 0 || math.IsNaN(score) {
+			continue
+		}
+		item := m.items[id]
+		hits = append(hits, Hit{
+			Chunk:        item.chunk,
+			Score:        score,
+			CollectionID: m.id,
+			ParentID:     item.parentID,
+			HeadingPath:  item.heading,
+		})
+	}
+	sortIndexHits(hits)
+	if len(hits) > topK {
+		hits = hits[:topK]
+	}
+	return hits
+}
+
+func sortIndexHits(hits []Hit) {
 	sort.Slice(hits, func(i, j int) bool {
 		if hits[i].Score == hits[j].Score {
 			return hits[i].Chunk.ID < hits[j].Chunk.ID
 		}
 		return hits[i].Score > hits[j].Score
 	})
-	if len(hits) > topK {
-		hits = hits[:topK]
+}
+
+// WriteKeywords 把子块正文写进这些记录自己的集合关键词索引。
+// 不写向量库，也不把一个集合的正文写进另一个集合。
+// 向量为空时保留该片段已有的向量。reg 必须是 NewMemory 的结果。
+func WriteKeywords(ctx context.Context, reg Registry, recs []VectorRecord) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	return hits
+	mem, ok := reg.(*memoryRegistry)
+	if !ok || mem == nil {
+		return errors.New("index: keyword writes need the memory index")
+	}
+	return mem.writeKeywords(ctx, recs)
+}
+
+func (r *memoryRegistry) writeKeywords(ctx context.Context, recs []VectorRecord) error {
+	grouped := make(map[model.CollectionID][]VectorRecord)
+	order := make([]model.CollectionID, 0)
+	for _, rec := range recs {
+		if err := validCollection(rec.CollectionID); err != nil {
+			return err
+		}
+		if rec.ChunkID == "" {
+			return errors.New("index: empty chunk id")
+		}
+		if _, ok := grouped[rec.CollectionID]; !ok {
+			order = append(order, rec.CollectionID)
+		}
+		grouped[rec.CollectionID] = append(grouped[rec.CollectionID], rec)
+	}
+	for _, id := range order {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		idx, err := r.Open(ctx, id)
+		if err != nil {
+			return err
+		}
+		mem, ok := idx.(*memoryIndex)
+		if !ok || mem.id != id {
+			return fmt.Errorf("index: opened keyword collection %s", id)
+		}
+		if err := mem.putKeywords(grouped[id]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *memoryIndex) putKeywords(recs []VectorRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, rec := range recs {
+		if rec.CollectionID != m.id {
+			return fmt.Errorf("index: chunk %s belongs to %s", rec.ChunkID, rec.CollectionID)
+		}
+		if rec.ChunkID == "" {
+			return errors.New("index: empty chunk id")
+		}
+		id := model.ChunkID(rec.ChunkID)
+		prev, exists := m.items[id]
+		vec := prev.vec
+		if len(rec.Vector) > 0 {
+			vec = append(embed.Vector(nil), rec.Vector...)
+		}
+		if !exists {
+			m.order = append(m.order, id)
+		}
+		docID := strconv.FormatInt(rec.DocID, 10)
+		m.items[id] = stored{
+			chunk: model.Chunk{
+				ID:           id,
+				DocumentID:   model.DocumentID(docID),
+				CollectionID: m.id,
+				Text:         rec.Body,
+				StartByte:    rec.StartByte,
+				EndByte:      rec.EndByte,
+			},
+			vec:      vec,
+			parentID: rec.ParentID,
+			heading:  rec.HeadingPath,
+		}
+	}
+	return nil
 }
 
 // keywordScore 是查询词集合与片段词集合的交集大小，除以查询词集合的大小。

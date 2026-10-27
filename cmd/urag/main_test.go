@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/xuhang113/urag/internal/embed"
 )
 
 func TestReadSeedsSkipsComments(t *testing.T) {
@@ -105,6 +108,87 @@ func TestCrawlKeepsOneEmbedProcess(t *testing.T) {
 			t.Fatalf("contains %s", frag)
 		}
 	}
+}
+
+func TestSearchAndIndexExitWithoutMilvusAddr(t *testing.T) {
+	t.Setenv("URAG_MILVUS_ADDR", "")
+	err := run([]string{"search", "crimson lantern"})
+	if err == nil || !strings.Contains(err.Error(), "URAG_MILVUS_ADDR") || !strings.Contains(err.Error(), "不会连接") {
+		t.Fatalf("%v", err)
+	}
+	err = run([]string{"index"})
+	if err == nil || !strings.Contains(err.Error(), "URAG_MILVUS_ADDR") || !strings.Contains(err.Error(), "不会连接") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestRerankDirFromEmbedCache(t *testing.T) {
+	root := t.TempDir()
+	embedDir := filepath.Join(root, "models--Qwen--Qwen3-Embedding-4B", "snapshots", "abc")
+	rerank := filepath.Join(root, "models--Qwen--Qwen3-Reranker-4B")
+	if err := os.MkdirAll(embedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rerankDir(embedDir); err == nil || !strings.Contains(err.Error(), "不会下载") {
+		t.Fatalf("%v", err)
+	}
+	if err := os.MkdirAll(rerank, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := rerankDir(embedDir)
+	if err != nil || got != rerank {
+		t.Fatalf("%s %v", got, err)
+	}
+}
+
+func TestReleaseEmbedderClosesBeforeReturn(t *testing.T) {
+	var order []string
+	emb := &orderEmbedder{mark: func() { order = append(order, "embed") }}
+	rel := &releaseEmbedder{inner: emb, release: func() error {
+		order = append(order, "close")
+		return nil
+	}}
+	if _, err := rel.Embed(context.Background(), []string{"q"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(order, ",") != "embed,close" {
+		t.Fatalf("%v", order)
+	}
+}
+
+func TestIndexCommandDoesNotLoadReranker(t *testing.T) {
+	body, err := os.ReadFile("milvus_cmd.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	start := strings.Index(text, "func indexCollection")
+	end := strings.Index(text, "func searchCollection")
+	if start < 0 || end < start {
+		t.Fatal("functions missing")
+	}
+	indexFn := text[start:end]
+	if strings.Contains(indexFn, "NewQwenReranker") || strings.Contains(indexFn, "QueryText") {
+		t.Fatal(indexFn)
+	}
+	for _, frag := range []string{"19530", "localhost", "@tcp("} {
+		if strings.Contains(text, frag) {
+			t.Fatalf("contains %s", frag)
+		}
+	}
+}
+
+type orderEmbedder struct {
+	mark func()
+}
+
+func (o *orderEmbedder) Dim() int { return 1 }
+
+func (o *orderEmbedder) Embed(context.Context, []string) ([]embed.Vector, error) {
+	if o.mark != nil {
+		o.mark()
+	}
+	return []embed.Vector{{1}}, nil
 }
 
 func TestCrawlExitsWhenModelDirMissing(t *testing.T) {

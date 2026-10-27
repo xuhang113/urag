@@ -300,6 +300,179 @@ func mustOne(t *testing.T, emb embed.Embedder, text string) embed.Vector {
 	return vecs[0]
 }
 
+func TestRetrieveChildrenVectorAndBM25Top50(t *testing.T) {
+	ctx := context.Background()
+	const n = 80
+	keywords := index.NewMemory()
+	recs := make([]index.VectorRecord, n)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("c%02d", i)
+		recs[i] = index.VectorRecord{
+			ChunkID:      id,
+			ParentID:     int64(1000 + i),
+			DocID:        7,
+			CollectionID: "alpha",
+			HeadingPath:  id,
+			Body:         "crimson lantern",
+			StartByte:    i,
+			EndByte:      i + 3,
+		}
+	}
+	if err := index.WriteKeywords(ctx, keywords, recs); err != nil {
+		t.Fatal(err)
+	}
+	kw, err := keywords.Open(ctx, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ranked, err := kw.SearchKeyword(ctx, index.Query{
+		CollectionID: "alpha",
+		Tokens:       embed.Tokens("crimson lantern"),
+		TopK:         50,
+		Rank:         index.RankBM25,
+	})
+	if err != nil || len(ranked) != 50 || ranked[0].Chunk.ID != "c00" || ranked[49].Chunk.ID != "c49" {
+		t.Fatalf("%v %d", err, len(ranked))
+	}
+	if 0.3*ranked[0].Score >= 0.7 {
+		t.Fatalf("bm25 hybrid %v is not below the vector hybrid", ranked[0].Score)
+	}
+
+	vecHits := make([]index.Hit, 0, 40)
+	for i := 40; i < n; i++ {
+		id := fmt.Sprintf("c%02d", i)
+		vecHits = append(vecHits, index.Hit{
+			Chunk: model.Chunk{
+				ID:           model.ChunkID(id),
+				DocumentID:   "7",
+				CollectionID: "alpha",
+				Text:         "crimson lantern",
+			},
+			Score:        1,
+			CollectionID: "alpha",
+			HeadingPath:  id,
+		})
+	}
+	vectors := &vectorOnly{id: "alpha", hits: vecHits}
+	opened := &vectorRegistry{idx: vectors}
+	reg, err := index.NewSplit(opened, keywords)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emb := embed.NewFixture(8)
+	queryEmb := &recordingEmbedder{inner: emb}
+	svc := retrieve.New(reg, queryEmb, retrieve.Weights{}, nil)
+	rr := &captureReranker{}
+	parents := &parentMap{body: map[int64]string{}}
+	for i := 40; i < 48; i++ {
+		parents.body[int64(1000+i)] = "父节 " + fmt.Sprintf("c%02d", i)
+	}
+	const question = "crimson lantern"
+	hits, err := svc.RetrieveChildren(ctx, retrieve.Request{
+		Collections: []model.CollectionID{"alpha"},
+		Query:       question,
+		TopK:        1,
+	}, rr, parents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vectors.keywordCalls != 0 {
+		t.Fatalf("vector store keyword calls %d", vectors.keywordCalls)
+	}
+	if len(opened.opened) != 1 || opened.opened[0] != "alpha" {
+		t.Fatalf("opened %v", opened.opened)
+	}
+	if _, ok := keywords.Get("gamma"); ok {
+		t.Fatal("gamma was opened")
+	}
+	if len(rr.passages) != 50 || rr.query != embed.QueryText(question) {
+		t.Fatalf("passages %d query %q", len(rr.passages), rr.query)
+	}
+	if len(queryEmb.got) != 1 || queryEmb.got[0][0] != embed.QueryText(question) {
+		t.Fatalf("embed %+v", queryEmb.got)
+	}
+	want := map[string]bool{}
+	for i := 40; i < 80; i++ {
+		want[fmt.Sprintf("c%02d\ncrimson lantern", i)] = true
+	}
+	for i := 0; i < 10; i++ {
+		want[fmt.Sprintf("c%02d\ncrimson lantern", i)] = true
+	}
+	if len(want) != 50 {
+		t.Fatalf("want %d", len(want))
+	}
+	for _, passage := range rr.passages {
+		if !want[passage] {
+			t.Fatalf("unexpected passage %q", passage)
+		}
+		delete(want, passage)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing %v", want)
+	}
+	for i := 10; i < 40; i++ {
+		id := fmt.Sprintf("c%02d", i)
+		if containsString(rr.passages, id+"\ncrimson lantern") {
+			t.Fatalf("reranked %s", id)
+		}
+	}
+	if len(hits) != 8 || hits[0].ChunkID != "c40" || hits[0].Score != 50 || hits[0].CollectionID != "alpha" {
+		t.Fatalf("%+v", hits)
+	}
+	if hits[0].Text != "父节 c40" || hits[0].ParentID != 1040 || hits[0].HeadingPath != "c40" || hits[0].StartByte != 40 || hits[0].EndByte != 43 {
+		t.Fatalf("%+v", hits[0])
+	}
+	if hits[0].DocumentID != "7" {
+		t.Fatalf("%+v", hits[0])
+	}
+}
+
+type vectorOnly struct {
+	id           model.CollectionID
+	hits         []index.Hit
+	keywordCalls int
+}
+
+func (v *vectorOnly) Collection() model.CollectionID { return v.id }
+
+func (v *vectorOnly) Upsert(context.Context, []model.Chunk, []embed.Vector) error { return nil }
+
+func (v *vectorOnly) SearchVector(_ context.Context, q index.Query) ([]index.Hit, error) {
+	if q.CollectionID != v.id {
+		return nil, fmt.Errorf("collection %s", q.CollectionID)
+	}
+	out := append([]index.Hit(nil), v.hits...)
+	if q.TopK > 0 && len(out) > q.TopK {
+		out = out[:q.TopK]
+	}
+	return out, nil
+}
+
+func (v *vectorOnly) SearchKeyword(context.Context, index.Query) ([]index.Hit, error) {
+	v.keywordCalls++
+	return nil, errors.New("vector store has no keyword index")
+}
+
+type vectorRegistry struct {
+	idx    *vectorOnly
+	opened []model.CollectionID
+}
+
+func (r *vectorRegistry) Open(_ context.Context, id model.CollectionID) (index.Index, error) {
+	r.opened = append(r.opened, id)
+	if id != r.idx.id {
+		return nil, fmt.Errorf("refusing to open %s", id)
+	}
+	return r.idx, nil
+}
+
+func (r *vectorRegistry) Get(id model.CollectionID) (index.Index, bool) {
+	if id == r.idx.id {
+		return r.idx, true
+	}
+	return nil, false
+}
+
 func containsString(items []string, want string) bool {
 	for _, item := range items {
 		if item == want {

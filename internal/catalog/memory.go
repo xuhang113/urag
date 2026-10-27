@@ -2,7 +2,9 @@ package catalog
 
 import (
 	"context"
+	"errors"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -156,6 +158,39 @@ func (s *memoryStore) ListChildren(ctx context.Context, docID int64) ([]Child, e
 	out := make([]Child, len(kids))
 	copy(out, kids)
 	sort.Slice(out, func(i, j int) bool {
+		if out[i].Ordinal != out[j].Ordinal {
+			return out[i].Ordinal < out[j].Ordinal
+		}
+		return out[i].ChunkID < out[j].ChunkID
+	})
+	return out, nil
+}
+
+func (s *memoryStore) ListCollectionChildren(ctx context.Context, collectionID string) ([]CollectionChild, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(collectionID) == "" {
+		return nil, errors.New("catalog: empty collection_id")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]CollectionChild, 0)
+	for id, doc := range s.docs {
+		if doc.CollectionID != collectionID {
+			continue
+		}
+		for _, child := range s.children[id] {
+			out = append(out, CollectionChild{Child: child, Version: doc.Version})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].DocID != out[j].DocID {
+			return out[i].DocID < out[j].DocID
+		}
 		if out[i].Ordinal != out[j].Ordinal {
 			return out[i].Ordinal < out[j].Ordinal
 		}

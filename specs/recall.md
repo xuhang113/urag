@@ -77,6 +77,6 @@ Query:
 
 `Hit` 增加 `parent_id` 和 `heading_path`。原有字段保留。
 
-`RetrieveChildren` 只打开请求里点名的集合。混合召回先取前 50 个子块，只把这 50 对送去重排：查询是 `QueryText(问题)`，子块嵌入文本是 `heading_path + "\n" + body`，标题路径为空时只有 body。重排只产出分数，不生成答案。留下最多 8 条；不足 8 条就全留。然后按 `parent_id` 取父块整节并替换 `Text`。`parents` 为空或查不到时，`Text` 保持子块 body。每条命中都带 `collection_id`、`document_id`、`chunk_id`、`score`、`start_byte`、`end_byte`、`parent_id`、`heading_path`。
+`RetrieveChildren` 只打开请求里点名的集合。每个集合先做向量 top 200 和该集合关键词索引上的 BM25 top 200，合并后再取前 50 个子块，只把这 50 对送去重排：查询是 `QueryText(问题)`，子块嵌入文本是 `heading_path + "\n" + body`，标题路径为空时只有 body。重排只产出分数，不生成答案。留下最多 8 条；不足 8 条就全留。然后按 `parent_id` 取父块整节并替换 `Text`。`parents` 为空或查不到时，`Text` 保持子块 body。每条命中都带 `collection_id`、`document_id`、`chunk_id`、`score`、`start_byte`、`end_byte`、`parent_id`、`heading_path`。`Retrieve` 仍用词重叠比例，不改成 BM25。
 
 `NewQwenReranker` 在目录不存在时返回错误，不下载，也不加载嵌入模型。`NewOverlapReranker` 仍给原来的 `Retrieve` 使用。嵌入模型和重排模型不要同时加载。

@@ -49,6 +49,9 @@ type Hit struct {
 }
 
 const (
+	// childCandidateK 是向量检索和 BM25 各自的 topK。
+	// 合并之后才截到 childRecallLimit，避免向量分数打平时把更强的 BM25 命中挤出这 50 条。
+	childCandidateK  = 200
 	childRecallLimit = 50
 	childKeepLimit   = 8
 )
@@ -75,7 +78,7 @@ type Service interface {
 	Retrieve(ctx context.Context, req Request) ([]Hit, error)
 
 	// RetrieveChildren 只打开 req.Collections。
-	// 混合召回先取前 50 个子块，再只把这 50 对送给 rerank。
+	// 每个集合先取向量 top 200 和 BM25 top 200，合并后再留下前 50 个子块，只把这 50 对送给 rerank。
 	// 查询侧使用 embed.QueryText，子块嵌入文本是标题路径和正文。
 	// 重排后留下最多 8 条。parents 为空或查不到时，Text 保持子块正文。
 	RetrieveChildren(ctx context.Context, req Request, rerank PassageReranker, parents ParentLookup) ([]Hit, error)
@@ -235,11 +238,12 @@ func sortHits(hits []Hit) {
 	})
 }
 
-// RetrieveChildren 混合召回点名集合中的子块，只把前 50 条送去重排，再留下最多 8 条。
+// RetrieveChildren 在每个点名集合里做向量 top 200 和 BM25 top 200，合并后只把前 50 个子块送去重排，再留下最多 8 条。
 // 查询向量和重排查询都是 embed.QueryText(问题)。文档侧不加指令。
 // 子块嵌入文本是 heading_path + "\n" + body；标题路径为空时只有 body。
 // 重排只产出分数。parents 为 nil，或父块查不到时，Hit.Text 保持子块 body。
-// 未点名的集合不会被打开。不使用服务里原来的 Reranker，也不加载嵌入模型。
+// 未点名的集合不会被打开。不使用服务里原来的 Reranker。
+// 调用方要在嵌入结束并关掉嵌入模型之后，再让重排模型开始打分。
 func (s *service) RetrieveChildren(ctx context.Context, req Request, rerank PassageReranker, parents ParentLookup) ([]Hit, error) {
 	if s == nil {
 		return nil, errors.New("retrieve: nil service")
@@ -282,12 +286,22 @@ func (s *service) RetrieveChildren(ctx context.Context, req Request, rerank Pass
 		if idx.Collection() != id {
 			return nil, errors.New("retrieve: opened a different collection")
 		}
-		hits, err := s.searchOne(ctx, idx, index.Query{
+		q := index.Query{
 			CollectionID: id,
 			Vector:       vecs[0],
 			Tokens:       qtokens,
-			TopK:         math.MaxInt,
-		}, true)
+			TopK:         childCandidateK,
+			Rank:         index.RankBM25,
+		}
+		vecHits, err := idx.SearchVector(ctx, q)
+		if err != nil {
+			return nil, err
+		}
+		kwHits, err := idx.SearchKeyword(ctx, q)
+		if err != nil {
+			return nil, err
+		}
+		hits, err := mergeChildHits(id, vecHits, kwHits, s.weights)
 		if err != nil {
 			return nil, err
 		}
@@ -323,6 +337,84 @@ func (s *service) RetrieveChildren(ctx context.Context, req Request, rerank Pass
 		merged = []Hit{}
 	}
 	return applyParents(ctx, merged, parents)
+}
+
+func mergeChildHits(col model.CollectionID, vecHits, kwHits []index.Hit, w Weights) ([]Hit, error) {
+	type acc struct {
+		hit Hit
+		vec float64
+		kw  float64
+	}
+	order := make([]model.ChunkID, 0, len(vecHits)+len(kwHits))
+	byID := make(map[model.ChunkID]*acc, len(vecHits)+len(kwHits))
+	add := func(h index.Hit, vec, kw float64) error {
+		if h.Chunk.CollectionID != "" && h.Chunk.CollectionID != col {
+			return fmt.Errorf("retrieve: index returned collection %s for %s", h.Chunk.CollectionID, col)
+		}
+		if h.CollectionID != "" && h.CollectionID != col {
+			return fmt.Errorf("retrieve: index returned collection %s for %s", h.CollectionID, col)
+		}
+		id := h.Chunk.ID
+		item, ok := byID[id]
+		if !ok {
+			item = &acc{hit: Hit{
+				CollectionID: col,
+				DocumentID:   h.Chunk.DocumentID,
+				ChunkID:      id,
+				Text:         h.Chunk.Text,
+				StartByte:    h.Chunk.StartByte,
+				EndByte:      h.Chunk.EndByte,
+				ParentID:     h.ParentID,
+				HeadingPath:  h.HeadingPath,
+			}}
+			byID[id] = item
+			order = append(order, id)
+		} else {
+			if item.hit.Text == "" {
+				item.hit.Text = h.Chunk.Text
+			}
+			if item.hit.DocumentID == "" {
+				item.hit.DocumentID = h.Chunk.DocumentID
+			}
+			if item.hit.StartByte == 0 && item.hit.EndByte == 0 && (h.Chunk.StartByte != 0 || h.Chunk.EndByte != 0) {
+				item.hit.StartByte = h.Chunk.StartByte
+				item.hit.EndByte = h.Chunk.EndByte
+			}
+			if item.hit.ParentID == 0 {
+				item.hit.ParentID = h.ParentID
+			}
+			if item.hit.HeadingPath == "" {
+				item.hit.HeadingPath = h.HeadingPath
+			}
+		}
+		if vec > item.vec {
+			item.vec = vec
+		}
+		if kw > item.kw {
+			item.kw = kw
+		}
+		return nil
+	}
+	for _, h := range vecHits {
+		if err := add(h, h.Score, 0); err != nil {
+			return nil, err
+		}
+	}
+	for _, h := range kwHits {
+		if err := add(h, 0, h.Score); err != nil {
+			return nil, err
+		}
+	}
+	out := make([]Hit, 0, len(order))
+	for _, id := range order {
+		item := byID[id]
+		item.hit.Score = w.Vector*item.vec + w.Keyword*item.kw
+		if item.hit.Score <= 0 || math.IsNaN(item.hit.Score) {
+			continue
+		}
+		out = append(out, item.hit)
+	}
+	return out, nil
 }
 
 func childEmbedText(heading, body string) string {

@@ -68,6 +68,21 @@ go run ./cmd/urag crawl seeds.txt
 
 重排模型是 `Qwen/Qwen3-Reranker-4B`，由 `NewQwenReranker` 另行加载。它的目录同样可以是缓存根目录 `models--Qwen--Qwen3-Reranker-4B`。它只给调用方送来的段落打分，不查库，不生成答案。收录期间嵌入子进程一直占着模型闸。它退出之后，重排子进程才可以启动，两个模型不会同时常驻。指令与嵌入相同：`Instruct: Given a web search query, retrieve relevant passages that answer the query`，`Query:` 后面直接接问题。本机没有重排模型卡，程序不联网打开模型页。前向使用本机已有的 Python，还需要该环境里的 `torch` 和 `transformers`；程序不替你安装，也不下载权重。
 
+## 生产检索
+
+`urag crawl` 继续把向量写在磁盘索引里。生产向量库是 Milvus。
+
+```bash
+go run ./cmd/urag index
+go run ./cmd/urag search 问题
+```
+
+两条命令都读取 `URAG_MILVUS_ADDR`。没有这个地址就退出，不会连接猜出来的主机或端口。示例只在 `.env.example` 里，值是假的。
+
+`index` 只读取台账里该集合的子块。嵌入文本是 `chunk.Passage`，文档侧不加指令。向量、`chunk_id`、`parent_id`、`doc_id`、`version`、`collection_id`、`heading_path`、`page` 和子块正文写入这一个 Milvus collection。不写 PDF 或 DOCX 原文，不把 BM25 写进 Milvus，也不打开别的集合。建索引只加载嵌入模型，不加载重排模型，不读种子，不改断点。
+
+`search` 只打开 `URAG_COLLECTION`。向量 top 200 和该集合关键词索引上的 BM25 top 200 合并后，只把前 50 个子块送给 `Qwen/Qwen3-Reranker-4B`。重排只出分数。留下最多 8 条，再按 `parent_id` 从台账取父块整节。查询使用 `embed.QueryText`。嵌入进程关掉之后才启动重排进程。关键词索引由台账里的子块正文在内存里重建，不另起搜索引擎。
+
 ## 验收页
 
 ```bash

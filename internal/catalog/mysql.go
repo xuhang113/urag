@@ -70,6 +70,14 @@ ORDER BY ordinal, chunk_id`
 	countDocumentsSQL = `
 SELECT COUNT(*) FROM source_document WHERE collection_id = ?`
 
+	selectCollectionChildrenSQL = `
+SELECT c.chunk_id, c.parent_id, c.doc_id, c.ordinal, c.start_byte, c.end_byte,
+       c.heading_path, c.page, c.body, d.version
+FROM child_chunk c
+INNER JOIN source_document d ON d.doc_id = c.doc_id
+WHERE d.collection_id = ?
+ORDER BY c.doc_id, c.ordinal, c.chunk_id`
+
 	deleteChildrenSQL = `DELETE FROM child_chunk WHERE doc_id = ?`
 	deleteParentsSQL  = `DELETE FROM parent_section WHERE doc_id = ?`
 
@@ -299,6 +307,36 @@ func (m *MySQL) ListChildren(ctx context.Context, docID int64) ([]Child, error) 
 	}
 	if err := commit(tx); err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+func (m *MySQL) ListCollectionChildren(ctx context.Context, collectionID string) ([]CollectionChild, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(collectionID) == "" {
+		return nil, errors.New("catalog: empty collection_id")
+	}
+	rows, err := m.db.QueryContext(ctx, selectCollectionChildrenSQL, collectionID)
+	if err != nil {
+		return nil, fmt.Errorf("catalog: list collection children: %w", err)
+	}
+	defer rows.Close()
+	out := []CollectionChild{}
+	for rows.Next() {
+		var child CollectionChild
+		if err := rows.Scan(
+			&child.ChunkID, &child.ParentID, &child.DocID, &child.Ordinal,
+			&child.StartByte, &child.EndByte, &child.HeadingPath, &child.Page, &child.Body,
+			&child.Version,
+		); err != nil {
+			return nil, fmt.Errorf("catalog: list collection children: %w", err)
+		}
+		out = append(out, child)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("catalog: list collection children: %w", err)
 	}
 	return out, nil
 }

@@ -11,8 +11,8 @@ import (
 
 // Hit 是一个集合内的一条命中。
 // CollectionID 与这条命中所属的集合相同。
-// 内存索引没有父块，ParentID 为 0，HeadingPath 为空。
-// 磁盘记录把父块编号和标题路径带到命中上。
+// 只通过 Upsert 写入的内存片段没有父块，ParentID 为 0，HeadingPath 为空。
+// WriteKeywords 和磁盘记录会把父块编号和标题路径带到命中上。
 type Hit struct {
 	Chunk        model.Chunk
 	Score        float64
@@ -21,16 +21,24 @@ type Hit struct {
 	HeadingPath  string
 }
 
+// RankBM25 让 SearchKeyword 使用该集合关键词索引上的 BM25。
+// 空字符串仍是词重叠比例，召回夹具继续用这个比例。
+const RankBM25 = "bm25"
+
 // Query 是对一个集合的查询。CollectionID 必须点名。
+// Rank 为空时 SearchKeyword 使用词重叠比例。
+// Rank 为 RankBM25 时，分数只来自本集合的关键词索引。
 type Query struct {
 	CollectionID model.CollectionID
 	Vector       embed.Vector
 	Tokens       []string
 	TopK         int
+	Rank         string
 }
 
 // Index 只服务 Collection 返回的那一个集合。
-// 关键词分数固定为 |queryTokens ∩ chunkTokens| / |queryTokens|，查询无词时为 0。
+// Rank 为空时，关键词分数是 |queryTokens ∩ chunkTokens| / |queryTokens|，查询无词时为 0。
+// Rank 为 RankBM25 时，关键词分数是本集合的 BM25。
 // 向量分数是余弦相似度。分数小于等于 0 的命中不返回。
 type Index interface {
 	// Collection 返回这个索引所属的集合。
@@ -45,9 +53,11 @@ type Index interface {
 	// q.CollectionID 必须等于本集合，否则返回错误。最多返回 TopK 条。
 	SearchVector(ctx context.Context, q Query) ([]Hit, error)
 
-	// SearchKeyword 在本集合内按词重叠分数搜索。
-	// 分数是 |queryTokens ∩ chunkTokens| / |queryTokens|。查询无词时分数为 0。
+	// SearchKeyword 在本集合的关键词索引里搜索。
+	// Rank 为空时，分数是 |queryTokens ∩ chunkTokens| / |queryTokens|。
+	// Rank 为 RankBM25 时，分数是本集合上的 BM25。查询无词时分数为 0。
 	// q.CollectionID 必须等于本集合，否则返回错误。最多返回 TopK 条。
+	// 不会把 BM25 写进向量库，也不会查到另一个集合。
 	SearchKeyword(ctx context.Context, q Query) ([]Hit, error)
 }
 

@@ -62,6 +62,11 @@ type Store interface {
 	// 文档不存在时返回 ErrNotFound。文档存在但没有子块时返回空切片。
 	ListChildren(ctx context.Context, docID int64) ([]Child, error)
 
+	// ListCollectionChildren 返回这一个集合的全部子块，并带上来源版本。
+	// 不返回其他集合，也不返回 PDF 或 DOCX 原文。
+	// 集合没有子块时返回空切片。collection_id 为空时返回错误。
+	ListCollectionChildren(ctx context.Context, collectionID string) ([]CollectionChild, error)
+
 	// CountIndexed 返回该集合的 source_document 行数。
 	// 表里没有重复标记。调用方只写入清洗后不是重复、且至少有一个子块的文档。
 	// 本方法不检查子块，集合没有来源时返回 0。
@@ -98,6 +103,13 @@ type Parent struct {
 	PageFrom    int
 	PageTo      int
 	Body        string
+}
+
+// CollectionChild 是一个集合里待嵌入的子块，带上来源版本。
+// 正文是清洗后的子块，不是原始文件。
+type CollectionChild struct {
+	Child
+	Version int
 }
 
 // Child 是父块里的一个子块。

@@ -43,6 +43,10 @@ type VectorRecord struct {
 	Page         int
 	Body         string
 	Vector       embed.Vector
+	// StartByte 与 EndByte 只进入磁盘记录和关键词索引。
+	// Milvus 行不保存这两个偏移，也不保存 PDF 或 DOCX 原文。
+	StartByte int
+	EndByte   int
 }
 
 type diskMeta struct {
@@ -193,6 +197,8 @@ func (d *Disk) UpsertRecords(ctx context.Context, recs []VectorRecord) error {
 		grouped[rec.CollectionID] = append(grouped[rec.CollectionID], storedRecord{
 			rec:        rec,
 			documentID: strconv.FormatInt(rec.DocID, 10),
+			startByte:  rec.StartByte,
+			endByte:    rec.EndByte,
 		})
 	}
 	for _, id := range order {
@@ -244,9 +250,58 @@ func (m *diskIndex) SearchKeyword(ctx context.Context, q Query) ([]Hit, error) {
 	if err := m.check(ctx, q); err != nil {
 		return nil, err
 	}
+	if q.Rank == RankBM25 {
+		return m.searchBM25(ctx, q)
+	}
+	if q.Rank != "" {
+		return nil, fmt.Errorf("index: unknown keyword rank %q", q.Rank)
+	}
 	return m.search(ctx, q, func(rec storedRecord, _ []float32) float64 {
 		return keywordScore(q.Tokens, rec.rec.Body)
 	})
+}
+
+// searchBM25 只扫描本集合的子块正文。向量缓冲在扫描回调里复用，不留下。
+func (m *diskIndex) searchBM25(ctx context.Context, q Query) ([]Hit, error) {
+	if q.TopK <= 0 || len(uniqueTokens(q.Tokens)) == 0 {
+		return []Hit{}, nil
+	}
+	var recs []storedRecord
+	err := m.scan(ctx, func(rec storedRecord, _ []float32) error {
+		if rec.rec.CollectionID != m.id {
+			return nil
+		}
+		rec.rec.Vector = nil
+		recs = append(recs, rec)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	recs = dedupeStored(recs)
+	docs := make([][]string, len(recs))
+	for i, rec := range recs {
+		docs[i] = embed.Tokens(rec.rec.Body)
+	}
+	scores := bm25Scores(docs, q.Tokens)
+	hits := make([]Hit, 0)
+	for i, rec := range recs {
+		score := scores[i]
+		if score <= 0 || math.IsNaN(score) {
+			continue
+		}
+		hits = append(hits, hitFromStored(m.id, rec, score))
+	}
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].Score == hits[j].Score {
+			return hits[i].Chunk.ID < hits[j].Chunk.ID
+		}
+		return hits[i].Score > hits[j].Score
+	})
+	if len(hits) > q.TopK {
+		hits = hits[:q.TopK]
+	}
+	return hits, nil
 }
 
 func (m *diskIndex) check(ctx context.Context, q Query) error {

@@ -461,6 +461,63 @@ func TestRejectsBadChecksum(t *testing.T) {
 	}
 }
 
+func TestListCollectionChildrenStaysInCollection(t *testing.T) {
+	st := NewMemory()
+	ctx := context.Background()
+	alpha := sampleDocument("https://example.invalid/alpha-child", "甲", "alpha")
+	alpha.Version = 4
+	docA, err := st.PutDocument(ctx, alpha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beta := sampleDocument("https://example.invalid/beta-child", "乙", "beta")
+	beta.CollectionID = "beta"
+	beta.Version = 2
+	docB, err := st.PutDocument(ctx, beta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentA, err := st.PutParent(ctx, Parent{DocID: docA, HeadingPath: "章", Body: "父"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentB, err := st.PutParent(ctx, Parent{DocID: docB, HeadingPath: "别", Body: "另一父"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutChild(ctx, Child{ParentID: parentA, DocID: docA, Ordinal: 1, HeadingPath: "章", Page: 3, Body: "后一段", StartByte: 2, EndByte: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutChild(ctx, Child{ParentID: parentA, DocID: docA, Ordinal: 0, HeadingPath: "章", Body: "先一段"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutChild(ctx, Child{ParentID: parentB, DocID: docB, Ordinal: 0, Body: "beta 子块"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.ListCollectionChildren(ctx, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Ordinal != 0 || got[1].Ordinal != 1 || got[0].Version != 4 || got[1].Body != "后一段" {
+		t.Fatalf("%+v", got)
+	}
+	if got[1].StartByte != 2 || got[1].EndByte != 5 || got[1].Page != 3 || got[0].ParentID != parentA {
+		t.Fatalf("%+v", got)
+	}
+	for _, child := range got {
+		if strings.Contains(child.Body, "%PDF") || child.DocID == docB {
+			t.Fatalf("%+v", child)
+		}
+	}
+	other, err := st.ListCollectionChildren(ctx, "gamma")
+	if err != nil || len(other) != 0 {
+		t.Fatalf("%+v %v", other, err)
+	}
+	if _, err := st.ListCollectionChildren(ctx, "  "); err == nil {
+		t.Fatal("empty collection should fail")
+	}
+}
+
 func TestChunkIDUsesDecimalOrdinal(t *testing.T) {
 	if got, want := ChunkID(12, 0), "12#0"; got != want {
 		t.Fatalf("ChunkID(12, 0) = %s", got)

@@ -20,7 +20,9 @@ urag 把外部材料收成可检索的集合。一条材料按固定顺序走完
 
 篇数是清洗后 `Duplicate` 为 false，且至少有一个子块的来源。`catalog.CountIndexed` 数这些来源行。不支持的类型、下载失败和重复文档不计入。没有子块的文档不计入。
 
-嵌入文本用 `chunk.Passage`。向量按批写入该集合的磁盘索引。同一来源 URL 只有一行台账。`Job.Checkpoint` 的 `source_uris` 记下已经处理完的来源 URL。`urag crawl` 把同一份 JSON 写到 `URAG_DATA_DIR/crawl-checkpoint.json`，下次启动先读入再跳过。失败最多尝试 3 次，次数含第一次。取消不重试。
+嵌入文本用 `chunk.Passage`。`urag crawl` 仍按批把向量写入该集合的磁盘索引，不读 Milvus，也不改成生产检索命令。同一来源 URL 只有一行台账。`Job.Checkpoint` 的 `source_uris` 记下已经处理完的来源 URL。`urag crawl` 把同一份 JSON 写到 `URAG_DATA_DIR/crawl-checkpoint.json`，下次启动先读入再跳过。失败最多尝试 3 次，次数含第一次。取消不重试。
+
+生产建库另走 `urag index`：只嵌入台账里的子块，写入该集合自己的 Milvus collection。`urag search` 在点名集合里做向量检索和 BM25，再重排。没有 `URAG_MILVUS_ADDR` 时这两条命令退出，不连接猜出来的地址。
 
 ## 集合隔离
 
