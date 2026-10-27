@@ -164,7 +164,7 @@ func TestQwenForwardScriptIsLocal(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(body)
-	for _, frag := range []string{"local_files_only=True", "hidden_size", "mps", "float16", "2560", "sys.stdin.readline", "if model is None", "load_embed_done", "query_vector_done", "URAG_STEP_FD"} {
+	for _, frag := range []string{"local_files_only=True", "hidden_size", "mps", "float16", "2560", "sys.stdin.readline", "if model is None", "load_embed_done", "query_vector_done", "URAG_STEP_FD", "embed_device", "embed_device_done"} {
 		if !strings.Contains(text, frag) {
 			t.Fatalf("script missing %s", frag)
 		}

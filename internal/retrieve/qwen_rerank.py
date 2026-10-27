@@ -63,6 +63,21 @@ def choose_runtime():
     return torch.device("cpu"), torch.float32
 
 
+def row_groups(rows, budget):
+    group = []
+    used = 0
+    for row in rows:
+        width = len(row)
+        if group and used + width > budget:
+            yield group
+            group = []
+            used = 0
+        group.append(row)
+        used += width
+    if group:
+        yield group
+
+
 def score_batch(req):
     model_dir = req["model_dir"]
     pairs = req.get("pairs")
@@ -113,17 +128,28 @@ def score_batch(req):
         return_attention_mask=False,
         max_length=keep,
     )
-    for index, token_ids in enumerate(inputs["input_ids"]):
-        inputs["input_ids"][index] = prefix_tokens + list(token_ids) + suffix_tokens
-    features = tokenizer.pad(inputs, padding=True, return_tensors="pt", max_length=8192)
-    features = {key: value.to(device) for key, value in features.items()}
-    with torch.no_grad():
-        logits = model(**features).logits[:, -1, :]
-        true_vector = logits[:, token_true]
-        false_vector = logits[:, token_false]
-        stacked = torch.stack([false_vector, true_vector], dim=1)
-        scores = torch.nn.functional.log_softmax(stacked.float(), dim=1).exp()[:, 1]
-        values = scores.tolist()
+    rows = []
+    for token_ids in inputs["input_ids"]:
+        rows.append(prefix_tokens + list(token_ids) + suffix_tokens)
+    # 一次前向只留大约两千个 token。五十条长段落垫成同一批时，
+    # 词表矩阵和注意力都大到 MPS 内核完不成。模型仍然只加载一次。
+    values = []
+    for group in row_groups(rows, 2048):
+        features = tokenizer.pad(
+            {"input_ids": group},
+            padding=True,
+            return_tensors="pt",
+        )
+        features = {key: value.to(device) for key, value in features.items()}
+        with torch.no_grad():
+            # 左边填充时，最后一个位置就是真正的末 token。输出层只打这一列。
+            hidden = model.model(**features).last_hidden_state[:, -1, :]
+            last = model.lm_head(hidden)
+            true_vector = last[:, token_true]
+            false_vector = last[:, token_false]
+            stacked = torch.stack([false_vector, true_vector], dim=1)
+            picked = torch.nn.functional.log_softmax(stacked.float(), dim=1).exp()[:, 1]
+            values.extend(picked.tolist())
     if len(values) != len(pairs):
         raise SystemExit("score count does not match the batch")
     note("rerank_done")

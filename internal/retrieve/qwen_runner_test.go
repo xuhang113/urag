@@ -205,12 +205,15 @@ func TestQwenRerankScriptIsLocal(t *testing.T) {
 		"load_rerank_done",
 		"rerank_done",
 		"URAG_STEP_FD",
+		"last_hidden_state",
+		"lm_head",
+		"row_groups",
 	} {
 		if !strings.Contains(text, frag) {
 			t.Fatalf("script missing %s", frag)
 		}
 	}
-	for _, frag := range []string{"snapshot_download", "huggingface.co", ".generate(", `to("cpu")`, "to('cpu')", "NewQwen"} {
+	for _, frag := range []string{"snapshot_download", "huggingface.co", ".generate(", `to("cpu")`, "to('cpu')", "NewQwen", ".logits"} {
 		if strings.Contains(text, frag) {
 			t.Fatalf("script contains %s", frag)
 		}

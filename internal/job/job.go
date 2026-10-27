@@ -155,8 +155,8 @@ type Config struct {
 	// urag search 先重排再套它。生产进程从 URAG_RERANK_MIN_SCORE 读入，未设置时用 retrieve.DefaultRerankMinScore。
 	// 夹具评价走 Ask，不读这个字段。
 	RerankMinScore float64
-	// KeepEmbed 为 true 时，试查不在每次提问后关掉嵌入进程。
-	// urag try 在进程活着期间只加载一次嵌入模型。
+	// KeepEmbed 为 true 时，试查不在每次提问后关掉嵌入进程，并且不加载重排模型。
+	// urag try 不打开这个开关：每次提问加载嵌入，算完查询向量后退出，再加载重排。
 	KeepEmbed bool
 	// ParkEmbed 为 true 时，内存放不下嵌入和重排两个模型。
 	// 第一次需要重排前写一次取舍，之后的提问不再写。

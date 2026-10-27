@@ -115,7 +115,7 @@ func TestRunLocalProcessReadsStepFD(t *testing.T) {
 	mu.Lock()
 	rerankSteps := append([]string(nil), got...)
 	mu.Unlock()
-	if strings.Join(rerankSteps, ",") != "load_embed_done,query_vector_done" {
+	if strings.Join(rerankSteps, ",") != "load_embed_done,query_vector_done,unload_rerank,unload_rerank_done" {
 		t.Fatalf("rerank steps %v", rerankSteps)
 	}
 }

@@ -3,6 +3,7 @@ package retrieve
 import (
 	"context"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/xuhang113/urag/internal/embed"
@@ -26,10 +27,12 @@ const (
 	// StepParkEmbed 是内存放不下嵌入和重排两个模型时，第一次重排前写下的取舍。
 	// 嵌入进程继续留着，这次不再启动重排模型。
 	StepParkEmbed = "为重排暂时卸下嵌入"
-	// StepLoadRerank 是重排权重进入内存。嵌入进程没有占着模型闸时才会发生。
+	// StepLoadRerank 是重排权重进入内存。嵌入进程退出之后才会发生。
 	StepLoadRerank = "加载重排模型"
 	// StepRerank 是对这 50 条打分。
 	StepRerank = "重排"
+	// StepUnloadRerank 是重排进程退出，权重离开内存。
+	StepUnloadRerank = "退出重排模型"
 	// StepParents 是按父块编号取整节正文。
 	StepParents = "取父块"
 )
@@ -198,6 +201,9 @@ func HasRerankScores(ctx context.Context) bool {
 }
 
 func noteModelStep(ctx context.Context, token string) {
+	if noteDevice(ctx, token, "embed_device_done ", true) || noteDevice(ctx, token, "embed_device ", false) {
+		return
+	}
 	switch token {
 	case "load_embed_done":
 		Report(ctx, StepLoadEmbed, true)
@@ -219,5 +225,23 @@ func noteModelStep(ctx context.Context, token string) {
 		Report(ctx, StepUnloadEmbed, false)
 	case "unload_embed_done":
 		Report(ctx, StepUnloadEmbed, true)
+	case "unload_rerank":
+		Report(ctx, StepUnloadRerank, false)
+	case "unload_rerank_done":
+		Report(ctx, StepUnloadRerank, true)
 	}
+}
+
+// noteDevice 把嵌入进程报上来的 device 和 dtype 写成页面步骤。
+// 名称形如「嵌入设备 mps float16」。done 前缀必须先匹配，避免被开始前缀截走。
+func noteDevice(ctx context.Context, token, prefix string, done bool) bool {
+	if !strings.HasPrefix(token, prefix) {
+		return false
+	}
+	spec := strings.TrimSpace(strings.TrimPrefix(token, prefix))
+	if spec == "" || strings.ContainsAny(spec, "\n\r") {
+		return false
+	}
+	Report(ctx, "嵌入设备 "+spec, done)
+	return true
 }

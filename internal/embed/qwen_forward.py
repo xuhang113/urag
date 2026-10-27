@@ -39,6 +39,17 @@ def note(token):
         return
 
 
+def runtime_label(device, dtype):
+    name = getattr(device, "type", None) or str(device)
+    kind = str(dtype).split(".")[-1]
+    return "%s %s" % (name, kind)
+
+
+def note_device(prefix, device, dtype):
+    # 页面日志要看到这次前向实际使用的 device 和 dtype。
+    note(prefix + " " + runtime_label(device, dtype))
+
+
 def require_hidden(model_dir):
     path = os.path.join(model_dir, "config.json")
     try:
@@ -91,6 +102,7 @@ def load_model(model_dir):
 
     hf_logging.set_verbosity_error()
     device, dtype = choose_runtime()
+    note_device("embed_device", device, dtype)
     tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
     tokenizer.padding_side = "left"
     model = AutoModel.from_pretrained(
@@ -102,6 +114,7 @@ def load_model(model_dir):
     model.to(device)
     model.eval()
     model.config.use_cache = False
+    note_device("embed_device_done", device, dtype)
     return model, tokenizer, device
 
 

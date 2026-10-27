@@ -32,11 +32,15 @@ func RunLocalProcess(ctx context.Context, kind string, argv []string, stdin []by
 	if err != nil {
 		return nil, err
 	}
-	// 嵌入进程已经退出，模型不再占内存。重排进程不发这个记号。
-	// 记号在读完阶段管道之后才发，所以会排在查询向量完成之后。
-	if kind == KindEmbed {
+	// 进程已经退出，模型不再占内存。
+	// 记号在读完阶段管道之后才发，所以会排在这一批前向完成之后。
+	switch kind {
+	case KindEmbed:
 		EmitStep(ctx, "unload_embed")
 		EmitStep(ctx, "unload_embed_done")
+	case KindRerank:
+		EmitStep(ctx, "unload_rerank")
+		EmitStep(ctx, "unload_rerank_done")
 	}
 	return out, nil
 }

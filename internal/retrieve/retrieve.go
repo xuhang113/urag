@@ -451,6 +451,11 @@ func (s *service) scoreChildren(ctx context.Context, rerank PassageReranker, que
 		Report(ctx, StepLoadRerank, true)
 		Report(ctx, StepRerank, true)
 	}
+	// 真实重排进程退出时已经写过这一步。夹具没有子进程，这里补上，表示重排没有留下来。
+	if len(passages) > 0 && !StepDone(ctx, StepUnloadRerank) {
+		Report(ctx, StepUnloadRerank, false)
+		Report(ctx, StepUnloadRerank, true)
+	}
 	return scores, nil
 }
 

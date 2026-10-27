@@ -281,8 +281,11 @@ func TestTryCommandDoesNotWriteDSN(t *testing.T) {
 	if !strings.Contains(text, "URAG_MYSQL_DSN") || !strings.Contains(text, "NewQwenReranker") {
 		t.Fatal("try command missing ledger or rerank hook")
 	}
-	if !strings.Contains(text, "starter.Start(ctx)") || !strings.Contains(text, "KeepEmbed") || !strings.Contains(text, "ParkEmbed") {
-		t.Fatal("try does not keep one embed process for the server")
+	if strings.Contains(text, "KeepEmbed") || strings.Contains(text, "starter.Start") || strings.Contains(text, "ParkEmbed") {
+		t.Fatal("try still keeps the embedder resident and skips rerank")
+	}
+	if !strings.Contains(text, "Passages:") {
+		t.Fatal("try does not pass the reranker into the pipeline")
 	}
 }
 

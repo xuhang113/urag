@@ -73,6 +73,7 @@ func TestTryStreamKeepsLaterStagesUnfinished(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 	finished := []string{
+		"嵌入设备 mps float16",
 		retrieve.StepLoadEmbed,
 		retrieve.StepQueryVector,
 		retrieve.StepUnloadEmbed,
@@ -81,6 +82,7 @@ func TestTryStreamKeepsLaterStagesUnfinished(t *testing.T) {
 		retrieve.StepMergeTop50,
 		retrieve.StepLoadRerank,
 		retrieve.StepRerank,
+		retrieve.StepUnloadRerank,
 		retrieve.StepFilter(retrieve.DefaultRerankMinScore),
 		retrieve.StepParents,
 	}
@@ -374,6 +376,66 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
+type cycleEmbedder struct {
+	inner  embed.Embedder
+	mu     sync.Mutex
+	loads  int
+	closes int
+	open   bool
+}
+
+func (c *cycleEmbedder) Dim() int { return c.inner.Dim() }
+
+func (c *cycleEmbedder) Embed(ctx context.Context, texts []string) ([]embed.Vector, error) {
+	c.mu.Lock()
+	c.loads++
+	c.open = true
+	c.mu.Unlock()
+	embed.EmitStep(ctx, "embed_device mps float16")
+	embed.EmitStep(ctx, "embed_device_done mps float16")
+	embed.EmitStep(ctx, "load_embed_done")
+	embed.EmitStep(ctx, "query_vector_done")
+	return c.inner.Embed(ctx, texts)
+}
+
+func (c *cycleEmbedder) Close() error {
+	c.mu.Lock()
+	c.open = false
+	c.closes++
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *cycleEmbedder) holding() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.open
+}
+
+type cycleReranker struct {
+	emb   *cycleEmbedder
+	score float64
+	mu    sync.Mutex
+	n     int
+}
+
+func (c *cycleReranker) Score(ctx context.Context, _ string, passages []string) ([]float64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if c.emb == nil || c.emb.holding() {
+		return nil, errors.New("rerank while embedder is open")
+	}
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+	out := make([]float64, len(passages))
+	for i := range out {
+		out[i] = c.score
+	}
+	return out, nil
+}
+
 type phaseEmbedder struct {
 	dim    int
 	phase  chan string
@@ -388,6 +450,8 @@ func (p *phaseEmbedder) Embed(ctx context.Context, texts []string) ([]embed.Vect
 	if err := p.signal(ctx, "entered"); err != nil {
 		return nil, err
 	}
+	embed.EmitStep(ctx, "embed_device mps float16")
+	embed.EmitStep(ctx, "embed_device_done mps float16")
 	embed.EmitStep(ctx, "load_embed_done")
 	if err := p.signal(ctx, "loaded"); err != nil {
 		return nil, err
@@ -451,6 +515,41 @@ func (p parentBody) GetParent(ctx context.Context, id int64) (string, error) {
 type phaseReranker struct {
 	emb   *phaseEmbedder
 	score float64
+}
+
+func TestTryReloadsEmbedBeforeEachRerank(t *testing.T) {
+	emb := &cycleEmbedder{inner: embed.NewFixture(8)}
+	rr := &cycleReranker{emb: emb, score: 0.9}
+	h := publicTryHandler(t, emb, rr, retrieve.DefaultRerankMinScore)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	for i := 0; i < 2; i++ {
+		body := &lockedBuffer{}
+		if err := readTryStream(ctx, srv.URL+"/api/try", "crimson lantern", body); err != nil {
+			t.Fatal(err)
+		}
+		text := body.String()
+		for _, name := range []string{
+			"嵌入设备 mps float16",
+			retrieve.StepLoadEmbed,
+			retrieve.StepQueryVector,
+			retrieve.StepUnloadEmbed,
+			retrieve.StepLoadRerank,
+			retrieve.StepRerank,
+			retrieve.StepUnloadRerank,
+		} {
+			assertFinishedStep(t, latestStep(t, text, name))
+		}
+		if strings.Contains(text, noRerankFilterNote) || strings.Contains(text, retrieve.StepEmbedResident) || strings.Contains(text, retrieve.StepParkEmbed) {
+			t.Fatalf("query %d skipped rerank\n%s", i+1, text)
+		}
+	}
+	if emb.loads != 2 || emb.closes != 2 || rr.n != 2 {
+		t.Fatalf("loads %d closes %d reranks %d", emb.loads, emb.closes, rr.n)
+	}
 }
 
 func TestTryKeepsEmbedAndSkipsSecondModel(t *testing.T) {

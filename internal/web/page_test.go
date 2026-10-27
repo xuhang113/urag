@@ -437,8 +437,8 @@ func TestPageTry(t *testing.T) {
 	if !strings.Contains(body, "step.started") || !strings.Contains(body, "step.ended") || !strings.Contains(body, "step.seconds") {
 		t.Fatalf("try page does not render step times: %s", body)
 	}
-	if !strings.Contains(body, "只加载一次") {
-		t.Fatalf("try page missing resident embed: %s", body)
+	if !strings.Contains(body, "算完查询向量后卸下嵌入") || !strings.Contains(body, "再加载重排模型") || !strings.Contains(body, "嵌入设备") {
+		t.Fatalf("try page missing sequential rerank: %s", body)
 	}
 	if !strings.Contains(body, `id="try-note"`) || !strings.Contains(body, "payload.note") || !strings.Contains(body, "hit.score") {
 		t.Fatalf("try page missing hybrid score note: %s", body)

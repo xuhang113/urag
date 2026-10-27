@@ -27,7 +27,8 @@ import (
 
 // tryPage 在本机打开磁盘向量试查页。
 // 只打开集合 public。不连接 Milvus，不新建向量文件，也不把连接串写进输出。
-// 嵌入模型在这个进程里只启动一次，提问结束不退出。重排模型不和它一起留在内存里。
+// 每次提问加载嵌入，查询向量返回后嵌入进程退出，再加载重排，重排结束后重排进程退出。
+// 两个模型不同时留在内存里。下一次提问再加载嵌入。
 func tryPage(args []string) error {
 	if len(args) != 0 {
 		return errors.New("urag: try 不接收参数")
@@ -62,9 +63,8 @@ func tryPage(args []string) error {
 	if err != nil {
 		return err
 	}
-	// 查询向量用常驻嵌入。嵌入进程还在时不启动重排模型，试查按混合分返回。
-	cfg.KeepEmbed = true
-	cfg.ParkEmbed = !secondModelFits()
+	// 不常驻嵌入。常驻会占着模型闸，重排无法启动。
+	// 每次 Embed 单独起一个进程，返回前进程退出，然后再 Score。
 	reg, err := index.NewDisk(root, qwenMeta)
 	if err != nil {
 		return err
@@ -72,14 +72,6 @@ func tryPage(args []string) error {
 	emb, err := embed.NewQwen(modelDir, qwenMeta)
 	if err != nil {
 		return err
-	}
-	starter, ok := emb.(interface {
-		embed.Embedder
-		Start(context.Context) error
-		Close() error
-	})
-	if !ok {
-		return errors.New("urag: 嵌入进程无法常驻")
 	}
 	rr, err := retrieve.NewQwenReranker(rdir)
 	if err != nil {
@@ -110,10 +102,6 @@ func tryPage(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := starter.Start(ctx); err != nil {
-		return err
-	}
-	defer func() { _ = starter.Close() }()
 	ln, addr, err := listenTry()
 	if err != nil {
 		return err
