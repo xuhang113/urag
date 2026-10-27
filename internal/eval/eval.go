@@ -4,14 +4,19 @@
 package eval
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/xuhang113/urag/internal/model"
 	"github.com/xuhang113/urag/internal/retrieve"
 )
 
-// ErrNotImplemented 表示夹具读取尚未接通。
+// ErrNotImplemented 是评价尚未接通时的哨兵。
+// Load 会读取夹具文件，不返回这个错误。
 var ErrNotImplemented = errors.New("eval: not implemented")
 
 // Thresholds 是召回测试的及格线。低于对应阈值时测试失败。
@@ -40,7 +45,7 @@ type Score struct {
 
 // Report 比较一种切分和基线。
 // 没有基线时 Direction 为 baseline，RecallDelta 与 MRRDelta 为 0。
-// 有基线时，两个 delta 是全部题目的宏平均减去 paragraph 基线。
+// Compare 优先用 merged 的分数做差；没有 merged 时用各桶分数的宏平均。
 // 变高为 up，变低为 down，相同为 flat。
 // Scores 仍按集合分桶。多个集合的题只出现在 collection_id 为 merged 的项里。
 type Report struct {
@@ -74,10 +79,136 @@ type Fixture struct {
 }
 
 // Load 读取 path 上的夹具 JSON。
-// 文件不存在或 JSON 与 Fixture 不符时返回错误。
-// 当前返回 ErrNotImplemented，不读取 path。
+// 文件不存在、JSON 无法解析，或出现 Fixture 没有的字段时返回错误。
 func Load(path string) (Fixture, error) {
-	return Fixture{}, ErrNotImplemented
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Fixture{}, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var fx Fixture
+	if err := dec.Decode(&fx); err != nil {
+		return Fixture{}, err
+	}
+	if dec.More() {
+		return Fixture{}, errors.New("eval: trailing json")
+	}
+	return fx, nil
+}
+
+// Run 对题目打分。ranker 返回去重前的文档编号，相关文档按出现顺序；Run 自己去重保序。
+// 只含一个集合的题计入该集合；多个集合的题只计入 collection_id "merged"。
+// baseline 为空字符串时 Direction 为 "baseline"，delta 为 0。
+// baseline 非空时只记下这个名字，不在这里比较另一份报告，delta 仍为 0，Direction 为 flat。
+func Run(ctx context.Context, fx Fixture, ranker func(context.Context, Question) ([]model.DocumentID, error), splitterName, baseline string) (Report, error) {
+	if ranker == nil {
+		return Report{}, errors.New("eval: nil ranker")
+	}
+	hits := make([][]retrieve.Hit, len(fx.Questions))
+	for i, q := range fx.Questions {
+		if err := ctx.Err(); err != nil {
+			return Report{}, err
+		}
+		ids, err := ranker(ctx, q)
+		if err != nil {
+			return Report{}, err
+		}
+		ids = dedupeIDs(ids)
+		row := make([]retrieve.Hit, len(ids))
+		for j, id := range ids {
+			row[j] = retrieve.Hit{DocumentID: id}
+		}
+		hits[i] = row
+	}
+	recall, err := RecallAtK(fx.Questions, hits, fx.K)
+	if err != nil {
+		return Report{}, err
+	}
+	mrr, err := MeanReciprocalRank(fx.Questions, hits)
+	if err != nil {
+		return Report{}, err
+	}
+	mrrByID := make(map[string]float64, len(mrr))
+	for _, s := range mrr {
+		mrrByID[s.CollectionID] = s.MRR
+	}
+	scores := make([]Score, len(recall))
+	for i, s := range recall {
+		s.MRR = mrrByID[s.CollectionID]
+		scores[i] = s
+	}
+	report := Report{
+		Splitter: splitterName,
+		Baseline: baseline,
+		Scores:   scores,
+	}
+	if baseline == "" {
+		report.Direction = "baseline"
+	} else {
+		report.Direction = "flat"
+	}
+	return report, nil
+}
+
+// Compare 用候选的 merged Recall 减去基线的 merged Recall。
+// 某一份报告没有 merged 时，用该报告全部分数的宏平均代替。
+// MRRDelta 使用同样的规则。Direction：delta>0 为 up，<0 为 down，否则 flat。
+// 返回的报告保留候选的切分名称和分数，Baseline 记下基线的切分名称。
+func Compare(baseline, candidate Report) Report {
+	out := candidate
+	if baseline.Splitter != "" {
+		out.Baseline = baseline.Splitter
+	} else {
+		out.Baseline = baseline.Baseline
+	}
+	out.RecallDelta = metric(candidate, true) - metric(baseline, true)
+	out.MRRDelta = metric(candidate, false) - metric(baseline, false)
+	switch {
+	case out.RecallDelta > 0:
+		out.Direction = "up"
+	case out.RecallDelta < 0:
+		out.Direction = "down"
+	default:
+		out.Direction = "flat"
+	}
+	return out
+}
+
+func metric(r Report, recall bool) float64 {
+	for _, s := range r.Scores {
+		if s.CollectionID == "merged" {
+			if recall {
+				return s.RecallAtK
+			}
+			return s.MRR
+		}
+	}
+	if len(r.Scores) == 0 {
+		return 0
+	}
+	var sum float64
+	for _, s := range r.Scores {
+		if recall {
+			sum += s.RecallAtK
+		} else {
+			sum += s.MRR
+		}
+	}
+	return sum / float64(len(r.Scores))
+}
+
+func dedupeIDs(ids []model.DocumentID) []model.DocumentID {
+	seen := make(map[model.DocumentID]struct{}, len(ids))
+	out := make([]model.DocumentID, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 // RecallAtK 计算 Recall@K 的题目宏平均。

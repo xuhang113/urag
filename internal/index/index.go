@@ -4,13 +4,10 @@ package index
 
 import (
 	"context"
-	"errors"
 
 	"github.com/xuhang113/urag/internal/embed"
 	"github.com/xuhang113/urag/internal/model"
 )
-
-var errNotImplemented = errors.New("index: not implemented")
 
 // Hit 是一个集合内的一条命中。
 // CollectionID 与这条命中所属的集合相同。
@@ -30,7 +27,7 @@ type Query struct {
 
 // Index 只服务 Collection 返回的那一个集合。
 // 关键词分数固定为 |queryTokens ∩ chunkTokens| / |queryTokens|，查询无词时为 0。
-// 向量分数是余弦相似度。
+// 向量分数是余弦相似度。分数小于等于 0 的命中不返回。
 type Index interface {
 	// Collection 返回这个索引所属的集合。
 	Collection() model.CollectionID
@@ -58,18 +55,4 @@ type Registry interface {
 
 	// Get 返回已打开的集合索引。未打开时 ok 为 false。
 	Get(id model.CollectionID) (Index, bool)
-}
-
-type memoryRegistry struct{}
-
-// NewMemory 返回按集合分开的内存注册表。
-// 当前 Open 返回未实现错误，Get 返回 false，不保存数据。
-func NewMemory() Registry { return memoryRegistry{} }
-
-func (memoryRegistry) Open(context.Context, model.CollectionID) (Index, error) {
-	return nil, errNotImplemented
-}
-
-func (memoryRegistry) Get(model.CollectionID) (Index, bool) {
-	return nil, false
 }
