@@ -16,7 +16,9 @@ type Options struct {
 
 // Splitter 把一篇文档切成片段。
 // 每个 Chunk 的编号使用 documentID + "#" + ordinal。
-// StartByte 与 EndByte 标在 Document.Text 的字节区间上，Text[StartByte:EndByte] 能取回该片段。
+// StartByte 与 EndByte 落在 Document.Text 的字节区间上。
+// paragraph 和 drop_keywords 的片段正文等于 Text[StartByte:EndByte]。
+// heading 的正文已经去掉标题行，Text[StartByte:EndByte] 包含该片段，两者不一定相等。
 // 失败时返回错误，不返回半成品。空正文得到空切片。
 type Splitter interface {
 	// Name 返回切法名称，供评价报告引用。
