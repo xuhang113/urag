@@ -5,7 +5,10 @@ package clean
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/xuhang113/urag/internal/model"
@@ -15,7 +18,7 @@ var (
 	// ErrUnsupportedType 表示媒体类型不是 txt、md、html 或 pdf。
 	ErrUnsupportedType = errors.New("clean: unsupported type")
 
-	// ErrNotImplemented 表示清洗尚未接通。
+	// ErrNotImplemented 保留给旧调用方识别未接通的桩。接通后的 Clean 不再返回它。
 	ErrNotImplemented = errors.New("clean: not implemented")
 )
 
@@ -53,12 +56,90 @@ type cleaner struct {
 	dedup Deduper
 }
 
-// New 返回使用 dedup 做集合内去重的清洗器。dedup 可以为空。
-// 当前 Clean 返回 ErrNotImplemented，不读取正文，也不调用 dedup。
+// New 返回使用 dedup 做集合内去重的清洗器。dedup 可以为空，空时不去重。
 func New(dedup Deduper) Cleaner {
 	return cleaner{dedup: dedup}
 }
 
-func (cleaner) Clean(context.Context, Input) (model.Document, error) {
-	return model.Document{}, ErrNotImplemented
+func (c cleaner) Clean(ctx context.Context, in Input) (model.Document, error) {
+	if err := ctx.Err(); err != nil {
+		return model.Document{}, err
+	}
+	if in.Body == nil {
+		return model.Document{}, errors.New("clean: nil body")
+	}
+	raw, err := io.ReadAll(in.Body)
+	if err != nil {
+		return model.Document{}, fmt.Errorf("clean: read body: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return model.Document{}, err
+	}
+
+	media, err := detectMedia(in.Filename, raw)
+	if err != nil {
+		return model.Document{}, err
+	}
+	var text, enc string
+	if media == "pdf" {
+		text, enc, err = extractPDF(raw)
+	} else {
+		text, enc, err = decodeText(raw)
+	}
+	if err != nil {
+		return model.Document{}, err
+	}
+
+	stripDetail := fmt.Sprintf("kept bytes=%d", len(text))
+	if media == "html" {
+		text, stripDetail, err = stripHTML(text)
+		if err != nil {
+			return model.Document{}, err
+		}
+	}
+
+	sum := sha256.Sum256([]byte(text))
+	hash := hex.EncodeToString(sum[:])
+	id := model.DocumentID(string(in.CollectionID) + ":" + hash[:16])
+
+	duplicate := false
+	var dupOf model.DocumentID
+	if c.dedup != nil {
+		found, ok, findErr := c.dedup.Find(ctx, in.CollectionID, hash)
+		if findErr != nil {
+			return model.Document{}, findErr
+		}
+		if ok {
+			duplicate = true
+			dupOf = found
+		} else if putErr := c.dedup.Put(ctx, in.CollectionID, hash, id); putErr != nil {
+			return model.Document{}, putErr
+		}
+	}
+	dedupeDetail := fmt.Sprintf("hash=%s duplicate=false", hash)
+	if duplicate {
+		dedupeDetail = fmt.Sprintf("hash=%s duplicate=%s", hash, dupOf)
+	}
+
+	return model.Document{
+		ID:           id,
+		CollectionID: in.CollectionID,
+		Text:         text,
+		Duplicate:    duplicate,
+		Lineage: model.Lineage{
+			RawObjectKey: in.ObjectKey,
+			DocumentID:   id,
+			CollectionID: in.CollectionID,
+			ContentHash:  hash,
+			Steps: []model.CleanStep{
+				{Name: "detect", Detail: fmt.Sprintf("media=%s encoding=%s bytes=%d", media, enc, len(raw))},
+				{Name: "strip", Detail: stripDetail},
+				{Name: "dedupe", Detail: dedupeDetail},
+			},
+			DuplicateOf: dupOf,
+			Encoding:    enc,
+			MediaType:   media,
+			SourceURI:   in.SourceURI,
+		},
+	}, nil
 }

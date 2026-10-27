@@ -6,7 +6,7 @@
 
 重复文档 `Duplicate` 为 true，`Lineage.DuplicateOf` 指向已有文档，不进入索引。`Lineage.Steps` 按顺序保留每一步，`Name` 取 detect、strip、dedupe。`Lineage.RawObjectKey` 等于输入对象键。
 
-默认切分是 `NewParagraph`：先按空行分段，再按 `MaxLen` 打包，相邻片段带 `Overlap`。`MaxLen` 默认 800，`Overlap` 默认 100，单位是 `Document.Text` 的字节。`NewDropKeywords` 只用于对照，丢掉给定词并切碎。两种切法都把 `StartByte` 和 `EndByte` 标在 `Document.Text` 上，片段正文等于 `Text[StartByte:EndByte]`。`ChunkID` 为 `documentID + "#" + ordinal`。
+默认切分是 `NewParagraph`：先按空行分段，再按 `MaxLen` 打包，相邻片段带 `Overlap`。`MaxLen` 默认 800，小于等于 0 时按 800。`Overlap` 默认 100，0 表示默认，小于 0 时不重叠。重叠超过 `MaxLen` 一半时截到一半。单位是 `Document.Text` 的字节。`NewDropKeywords` 只用于对照，按整词且不区分大小写丢掉给定词，再切成不超过 20 字节的小块。两种切法都把 `StartByte` 和 `EndByte` 标在 `Document.Text` 上，片段正文等于 `Text[StartByte:EndByte]`。`ChunkID` 为 `documentID + "#" + ordinal`。
 
 ## 不做什么
 
