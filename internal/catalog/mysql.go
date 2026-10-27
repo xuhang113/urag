@@ -74,6 +74,18 @@ SELECT COUNT(*) FROM source_document WHERE collection_id = ?`
 	deleteParentsSQL  = `DELETE FROM parent_section WHERE doc_id = ?`
 
 	lockParentSQL = `SELECT doc_id FROM parent_section WHERE parent_id = ? FOR UPDATE`
+
+	// 同一次连接上读取步长。多值 INSERT 的后续编号按这个步长递增。
+	selectAutoIncStepSQL = `SELECT @@SESSION.auto_increment_increment`
+
+	// 按 doc_id 读回刚插入的父块。idx_parent_doc 支撑这个条件。
+	// FOR UPDATE 读当前事务里的新行，避免快照看不到刚插入的编号。
+	selectParentIDsSQL = `
+SELECT parent_id
+FROM parent_section
+WHERE doc_id = ?
+ORDER BY parent_id
+FOR UPDATE`
 )
 
 // ER_DUP_ENTRY。同一集合的同一个 source_uri，或同一个文档序号，都会落到这里。
@@ -318,36 +330,133 @@ func (m *MySQL) ReplaceSections(ctx context.Context, docID int64, groups []Paren
 		return err
 	}
 	defer rollback(tx)
+	if err := replaceSections(ctx, tx, docID, groups); err != nil {
+		return err
+	}
+	return commit(tx)
+}
+
+func replaceSections(ctx context.Context, tx *sql.Tx, docID int64, groups []ParentWithChildren) error {
 	if err := lockDocument(ctx, tx, docID); err != nil {
 		return err
 	}
 	// 先删子块，再删父块，外键才不会拦住。任一步失败都会回滚，旧段落仍在。
+	// 不关闭外键检查，也不改崩溃恢复用的日志刷盘。
 	if _, err := tx.ExecContext(ctx, deleteChildrenSQL, docID); err != nil {
 		return fmt.Errorf("catalog: delete children: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, deleteParentsSQL, docID); err != nil {
 		return fmt.Errorf("catalog: delete parents: %w", err)
 	}
-	for _, group := range groups {
-		res, err := tx.ExecContext(ctx, insertParentSQL,
-			docID, group.Parent.HeadingPath, group.Parent.PageFrom, group.Parent.PageTo, group.Parent.Body)
-		if err != nil {
-			return fmt.Errorf("catalog: insert parent: %w", err)
+	if len(groups) == 0 {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	step, err := sessionAutoIncStep(ctx, tx)
+	if err != nil {
+		return err
+	}
+	parentIDs, err := insertParentBatches(ctx, tx, docID, groups, step)
+	if err != nil {
+		return err
+	}
+	if err := matchParentIDs(ctx, tx, docID, parentIDs); err != nil {
+		return err
+	}
+	return insertChildBatches(ctx, tx, docID, groups, parentIDs)
+}
+
+func sessionAutoIncStep(ctx context.Context, tx *sql.Tx) (int64, error) {
+	var step int64
+	if err := tx.QueryRowContext(ctx, selectAutoIncStepSQL).Scan(&step); err != nil {
+		return 0, fmt.Errorf("catalog: auto increment step: %w", err)
+	}
+	if step <= 0 {
+		return 0, errors.New("catalog: auto increment step")
+	}
+	return step, nil
+}
+
+func insertParentBatches(ctx context.Context, tx *sql.Tx, docID int64, groups []ParentWithChildren, step int64) ([]int64, error) {
+	ids := make([]int64, 0, len(groups))
+	for _, batch := range parentBatches(docID, groups) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		parentID, err := generatedID(res)
+		res, err := tx.ExecContext(ctx, batch.query, batch.args...)
 		if err != nil {
+			return nil, fmt.Errorf("catalog: insert parent: %w", err)
+		}
+		first, err := generatedID(res)
+		if err != nil {
+			return nil, err
+		}
+		part, err := expandIDs(first, step, batch.rows)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, part...)
+	}
+	if len(ids) != len(groups) {
+		return nil, errors.New("catalog: parent id count")
+	}
+	return ids, nil
+}
+
+func insertChildBatches(ctx context.Context, tx *sql.Tx, docID int64, groups []ParentWithChildren, parentIDs []int64) error {
+	batches, err := childBatches(docID, groups, parentIDs)
+	if err != nil {
+		return err
+	}
+	for _, batch := range batches {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		for _, child := range group.Children {
-			_, err := tx.ExecContext(ctx, insertChildSQL,
-				ChunkID(docID, child.Ordinal), parentID, docID, child.Ordinal,
-				child.StartByte, child.EndByte, child.HeadingPath, child.Page, child.Body)
-			if err != nil {
-				return fmt.Errorf("catalog: insert child: %w", err)
-			}
+		_, err := tx.ExecContext(ctx, batch.query, batch.args...)
+		if isDuplicateKey(err) {
+			return ErrConflict
+		}
+		if err != nil {
+			return fmt.Errorf("catalog: insert child: %w", err)
 		}
 	}
-	return commit(tx)
+	return nil
+}
+
+func matchParentIDs(ctx context.Context, tx *sql.Tx, docID int64, want []int64) error {
+	rows, err := tx.QueryContext(ctx, selectParentIDsSQL, docID)
+	if err != nil {
+		return fmt.Errorf("catalog: parent ids: %w", err)
+	}
+	defer rows.Close()
+	got := make([]int64, 0, len(want))
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("catalog: parent ids: %w", err)
+		}
+		got = append(got, id)
+		if len(got) > len(want) {
+			return fmt.Errorf("%w count exceeds %d", errParentIDSequence, len(want))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("catalog: parent ids: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("catalog: parent ids: %w", err)
+	}
+	if len(got) != len(want) {
+		return fmt.Errorf("%w count %d want %d", errParentIDSequence, len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return fmt.Errorf("%w at %d", errParentIDSequence, i)
+		}
+	}
+	return nil
 }
 
 func (m *MySQL) begin(ctx context.Context) (*sql.Tx, error) {

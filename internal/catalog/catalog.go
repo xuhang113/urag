@@ -68,6 +68,7 @@ type Store interface {
 	CountIndexed(ctx context.Context, collectionID string) (int, error)
 
 	// ReplaceSections 在一个事务里换掉该文档的全部父块和子块。
+	// 先删该文档的旧父块和子块，再写入新段落。MySQL 按批插入，不按行提交。
 	// 文档不存在时返回 ErrNotFound，并不写入新段落。
 	// parents 为空时删掉旧段落，来源行仍在。
 	// 新的 parent_id 由存储生成。子块的 chunk_id、parent_id、doc_id 由存储填写。
