@@ -27,8 +27,12 @@ func TestLocalAndHTTPSameLineage(t *testing.T) {
 	if _, err := acquire.NewDatabase("postgres://127.0.0.1/db"); !errors.Is(err, acquire.ErrNotImplemented) {
 		t.Fatalf("数据库来源：%v", err)
 	}
-	if _, err := acquire.NewSitemap("https://127.0.0.1/sitemap.xml"); !errors.Is(err, acquire.ErrNotImplemented) {
+	sitemapSrc, err := acquire.NewSitemap("https://127.0.0.1/sitemap.xml")
+	if err != nil {
 		t.Fatalf("站点地图来源：%v", err)
+	}
+	if sitemapSrc.Kind() != acquire.KindSitemap {
+		t.Fatalf("站点地图 Kind = %q", sitemapSrc.Kind())
 	}
 	if _, err := acquire.NewVendorAPI("acme"); !errors.Is(err, acquire.ErrNotImplemented) {
 		t.Fatalf("厂商接口来源：%v", err)
