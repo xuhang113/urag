@@ -8,14 +8,20 @@ package job
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
+	"sync"
+	"time"
 
+	"github.com/xuhang113/urag/internal/acquire"
 	"github.com/xuhang113/urag/internal/chunk"
 	"github.com/xuhang113/urag/internal/clean"
 	"github.com/xuhang113/urag/internal/embed"
-	"github.com/xuhang113/urag/internal/eval"
 	"github.com/xuhang113/urag/internal/index"
 	"github.com/xuhang113/urag/internal/model"
 	"github.com/xuhang113/urag/internal/retrieve"
@@ -40,10 +46,20 @@ const (
 	KindFetch = "fetch"
 	// KindEval 是评价任务。
 	KindEval = "eval"
+
+	defaultFixturePath = "testdata/recall/fixture.json"
+	defaultAttempts    = 3
 )
 
-// ErrNotImplemented 表示任务管道尚未接通。
-var ErrNotImplemented = errors.New("job: not implemented")
+var (
+	// ErrNotImplemented 表示调用方要求的能力尚未接通。
+	ErrNotImplemented = errors.New("job: not implemented")
+
+	// ErrNotFound 表示任务不存在。
+	ErrNotFound = errors.New("job: not found")
+
+	errMissingDeps = errors.New("job: missing deps")
+)
 
 // Progress 是任务进度。Done 不超过 Total。Stage 是当前阶段名。
 type Progress struct {
@@ -81,7 +97,8 @@ type UploadInput struct {
 }
 
 // Accepted 是上传入队后立刻返回给调用方的结果。
-// 成功时带有任务、对象键、校验和和大小。清洗与嵌入尚未在这次调用里执行。
+// 成功时带有任务、对象键、校验和和大小。清洗与嵌入在任务里执行。
+// Inline 为 true 时，返回前任务已经跑完。
 type Accepted struct {
 	Job       Job
 	ObjectKey model.ObjectKey
@@ -109,18 +126,23 @@ type Limits struct {
 
 // Config 是进程组装参数。
 // Storage 只取 local 或 s3。FixturePath 是召回夹具路径。
+// Inline 为 true 时，清洗和建索引在入队方法返回前完成，成功状态为 succeeded。
+// UploadConcurrency 小于等于 0 时不限制同时运行的任务数。
 type Config struct {
-	Addr        string
-	DataDir     string
-	Storage     string
-	Retry       storage.RetryPolicy
-	Weights     retrieve.Weights
-	Chunk       chunk.Options
-	Limits      Limits
-	FixturePath string
+	Addr              string
+	DataDir           string
+	Storage           string
+	Retry             storage.RetryPolicy
+	Weights           retrieve.Weights
+	Chunk             chunk.Options
+	Limits            Limits
+	FixturePath       string
+	Inline            bool
+	UploadConcurrency int
 }
 
-// Deps 是管道使用的协作件。尚未接通的依赖可以为空。
+// Deps 是管道使用的协作件。Store、Embedder、Registry、Cleaner 不能为空。
+// 缺任意一个时 New 返回错误，不会换成全局索引。
 type Deps struct {
 	Store    storage.Store
 	Embedder embed.Embedder
@@ -131,57 +153,580 @@ type Deps struct {
 }
 
 // Pipeline 是上传、抓取、检索和评价的任务入口。
-// 当前各方法返回 ErrNotImplemented，不读取正文，也不访问依赖。
-type Pipeline struct{}
+type Pipeline struct {
+	cfg  Config
+	deps Deps
+	svc  retrieve.Service
 
-// New 组装管道。当前不拨号、不打开存储、不读取夹具。
-// 成功时返回非空管道。方法调用返回 ErrNotImplemented。
+	mu   sync.Mutex
+	jobs map[string]*jobRecord
+	docs map[model.CollectionID][]model.Document
+	sem  chan struct{}
+}
+
+type jobRecord struct {
+	Job         Job
+	filename    string
+	contentType string
+	sourceURI   string
+	fetch       *FetchInput
+	cancel      context.CancelFunc
+	done        chan struct{}
+	cleaned     map[model.ObjectKey]model.Document
+}
+
+type objectCheckpoint struct {
+	ObjectKeys []string `json:"object_keys"`
+}
+
+// New 组装管道。不拨号、不打开存储、不读取夹具。
+// Store、Embedder、Registry 或 Cleaner 为空时返回错误。
 func New(cfg Config, deps Deps) (*Pipeline, error) {
-	return &Pipeline{}, nil
+	if deps.Store == nil || deps.Embedder == nil || deps.Registry == nil || deps.Cleaner == nil {
+		return nil, errMissingDeps
+	}
+	if cfg.FixturePath == "" {
+		cfg.FixturePath = defaultFixturePath
+	}
+	if cfg.Weights.Vector == 0 && cfg.Weights.Keyword == 0 {
+		cfg.Weights = retrieve.Weights{Vector: 0.7, Keyword: 0.3}
+	}
+	if cfg.Chunk.MaxLen <= 0 {
+		cfg.Chunk.MaxLen = 800
+	}
+	if cfg.Chunk.Overlap <= 0 {
+		cfg.Chunk.Overlap = 100
+	}
+	p := &Pipeline{
+		cfg:  cfg,
+		deps: deps,
+		jobs: map[string]*jobRecord{},
+		docs: map[model.CollectionID][]model.Document{},
+	}
+	if cfg.UploadConcurrency > 0 {
+		p.sem = make(chan struct{}, cfg.UploadConcurrency)
+	}
+	p.svc = retrieve.New(deps.Registry, deps.Embedder, cfg.Weights, deps.Reranker)
+	return p, nil
 }
 
 // AcceptUpload 只把 Body 流式写入存储并入队。
-// 调用方立刻得到任务编号、对象键、校验和和大小。清洗和嵌入在任务里做。
+// 调用方得到任务编号、对象键、校验和和大小。清洗和嵌入在任务里做。
 // 单次读取不得超过 storage.CopyBufSize。禁止把 Body 读进内存。
 // 校验和不符时返回 storage.ErrChecksumMismatch，并且不重试。
-// 当前返回 ErrNotImplemented，不读取 Body。
+// Inline 为 true 时，返回前清洗和建索引已经结束，成功状态为 succeeded。
 func (p *Pipeline) AcceptUpload(ctx context.Context, in UploadInput) (Accepted, error) {
-	return Accepted{}, ErrNotImplemented
+	if p == nil || p.deps.Store == nil {
+		return Accepted{}, errMissingDeps
+	}
+	if in.Body == nil {
+		return Accepted{}, errors.New("job: empty body")
+	}
+	if in.CollectionID == "" {
+		return Accepted{}, errors.New("job: collection required")
+	}
+	key := newObjectKey(in.CollectionID, in.Filename)
+	meta, err := p.deps.Store.Put(ctx, key, in.Body, storage.PutOptions{
+		ContentType:    in.ContentType,
+		CollectionID:   in.CollectionID,
+		IdempotencyKey: in.IdempotencyKey,
+	})
+	if err != nil {
+		return Accepted{}, err
+	}
+	rec := p.newRecord(KindUpload, in.CollectionID)
+	rec.filename = in.Filename
+	rec.contentType = in.ContentType
+	rec.Job.ObjectKey = string(meta.Key)
+	rec.Job.Checksum = string(meta.Checksum)
+	rec.Job.Size = meta.Size
+	rec.Job.State = StateQueued
+	p.mu.Lock()
+	p.jobs[rec.Job.ID] = rec
+	p.mu.Unlock()
+	err = p.start(ctx, rec)
+	return Accepted{
+		Job:       p.snapshot(rec),
+		ObjectKey: meta.Key,
+		Checksum:  meta.Checksum,
+		Size:      meta.Size,
+	}, err
 }
 
-// SubmitFetch 按 Kind 把 URI 的抓取任务入队。
-// 成功时返回已入队的 Job。当前返回 ErrNotImplemented。
+// SubmitFetch 按 Kind 把 URI 的抓取任务入队，并立刻带上任务编号。
+// 任务里按 Kind 调用 acquire，再 IngestSource，然后与上传相同地清洗建索引。
+// Inline 为 true 时，返回前任务已经结束。
 func (p *Pipeline) SubmitFetch(ctx context.Context, in FetchInput) (Job, error) {
-	return Job{}, ErrNotImplemented
+	if p == nil || p.deps.Store == nil {
+		return Job{}, errMissingDeps
+	}
+	if in.CollectionID == "" || in.Kind == "" || in.URI == "" {
+		return Job{}, errors.New("job: fetch input incomplete")
+	}
+	copied := in
+	rec := p.newRecord(KindFetch, in.CollectionID)
+	rec.fetch = &copied
+	rec.Job.State = StateQueued
+	p.mu.Lock()
+	p.jobs[rec.Job.ID] = rec
+	p.mu.Unlock()
+	err := p.start(ctx, rec)
+	return p.snapshot(rec), err
 }
 
-// GetJob 返回编号为 id 的任务。任务不存在时返回错误。
-// 当前返回 ErrNotImplemented。
+// GetJob 返回编号为 id 的任务。任务不存在时返回 ErrNotFound。
 func (p *Pipeline) GetJob(ctx context.Context, id string) (Job, error) {
-	return Job{}, ErrNotImplemented
+	if p == nil {
+		return Job{}, errMissingDeps
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	rec, ok := p.jobs[id]
+	if !ok {
+		return Job{}, ErrNotFound
+	}
+	return cloneJob(rec.Job), nil
 }
 
-// Cancel 取消编号为 id 的任务。取消后不再重试。
-// 任务不存在时返回错误。当前返回 ErrNotImplemented。
+// Cancel 取消编号为 id 的任务。取消后状态为 canceled，不再重试。
+// 任务不存在时返回 ErrNotFound。
 func (p *Pipeline) Cancel(ctx context.Context, id string) error {
-	return ErrNotImplemented
+	if p == nil {
+		return errMissingDeps
+	}
+	p.mu.Lock()
+	rec, ok := p.jobs[id]
+	if !ok {
+		p.mu.Unlock()
+		return ErrNotFound
+	}
+	rec.Job.State = StateCanceled
+	cancel := rec.cancel
+	p.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return nil
 }
 
-// Documents 返回一个集合内的文档，不包含其他集合。
-// 当前返回 ErrNotImplemented。
+// Documents 返回一个集合内的清洗结果，包含 Duplicate 为 true 的文档。
+// 不包含其他集合。
 func (p *Pipeline) Documents(ctx context.Context, col model.CollectionID) ([]model.Document, error) {
-	return nil, ErrNotImplemented
+	if p == nil {
+		return nil, errMissingDeps
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	src := p.docs[col]
+	out := make([]model.Document, len(src))
+	copy(out, src)
+	return out, nil
 }
 
 // Ask 只检索 req 点名的集合，规则与 retrieve.Service 相同。
-// 当前返回 ErrNotImplemented。
+// 集合名单原样传给检索，不搜索未点名的集合。
 func (p *Pipeline) Ask(ctx context.Context, req retrieve.Request) ([]retrieve.Hit, error) {
-	return nil, ErrNotImplemented
+	if p == nil {
+		return nil, errMissingDeps
+	}
+	if len(req.Collections) == 0 {
+		return nil, retrieve.ErrCollectionsRequired
+	}
+	forwarded := req
+	forwarded.Collections = append([]model.CollectionID(nil), req.Collections...)
+	hits, err := p.svc.Retrieve(ctx, forwarded)
+	if err == nil {
+		if hits == nil {
+			return []retrieve.Hit{}, nil
+		}
+		return hits, nil
+	}
+	if err.Error() != "retrieve: not implemented" {
+		return nil, err
+	}
+	return p.searchNamed(ctx, p.deps.Registry, forwarded)
 }
 
-// Evaluate 读取夹具并生成报告。
-// 没有基线时 Direction 为 baseline，RecallDelta 与 MRRDelta 为 0。
-// 当前返回 ErrNotImplemented。
-func (p *Pipeline) Evaluate(ctx context.Context) (eval.Report, error) {
-	return eval.Report{}, ErrNotImplemented
+func (p *Pipeline) newRecord(kind string, col model.CollectionID) *jobRecord {
+	return &jobRecord{
+		Job: Job{
+			ID:           newID(),
+			Kind:         kind,
+			State:        StateQueued,
+			CollectionID: string(col),
+		},
+		cleaned: map[model.ObjectKey]model.Document{},
+	}
+}
+
+func (p *Pipeline) start(parent context.Context, rec *jobRecord) error {
+	base := parent
+	if !p.cfg.Inline || base == nil {
+		base = context.Background()
+	}
+	ctx, cancel := context.WithCancel(base)
+	rec.cancel = cancel
+	rec.done = make(chan struct{})
+	if p.cfg.Inline {
+		defer close(rec.done)
+		defer cancel()
+		return p.executeWithRetry(ctx, rec)
+	}
+	go func() {
+		defer close(rec.done)
+		defer cancel()
+		_ = p.executeWithRetry(ctx, rec)
+	}()
+	return nil
+}
+
+func (p *Pipeline) executeWithRetry(ctx context.Context, rec *jobRecord) error {
+	if err := p.acquire(ctx); err != nil {
+		p.finishCanceled(rec, err)
+		return err
+	}
+	defer p.release()
+	var last error
+	for {
+		p.mu.Lock()
+		if rec.Job.State == StateCanceled || errors.Is(ctx.Err(), context.Canceled) {
+			rec.Job.State = StateCanceled
+			if ctx.Err() != nil {
+				rec.Job.Error = ctx.Err().Error()
+			}
+			p.mu.Unlock()
+			return context.Canceled
+		}
+		if rec.Job.Attempts >= p.maxAttempts() {
+			if rec.Job.State != StateCanceled {
+				rec.Job.State = StateFailed
+			}
+			p.mu.Unlock()
+			if last == nil {
+				last = errors.New("job: attempts exhausted")
+			}
+			return last
+		}
+		rec.Job.Attempts++
+		rec.Job.State = StateRunning
+		attempt := rec.Job.Attempts
+		p.mu.Unlock()
+
+		err := p.execute(ctx, rec)
+		if err == nil {
+			p.mu.Lock()
+			if rec.Job.State != StateCanceled {
+				rec.Job.State = StateSucceeded
+				rec.Job.Error = ""
+			}
+			p.mu.Unlock()
+			return nil
+		}
+		last = err
+		p.mu.Lock()
+		rec.Job.Error = err.Error()
+		canceled := rec.Job.State == StateCanceled || errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled)
+		if canceled {
+			rec.Job.State = StateCanceled
+			p.mu.Unlock()
+			return err
+		}
+		if errors.Is(err, storage.ErrChecksumMismatch) {
+			rec.Job.State = StateFailed
+			p.mu.Unlock()
+			return err
+		}
+		p.mu.Unlock()
+		if attempt >= p.maxAttempts() {
+			p.mu.Lock()
+			if rec.Job.State != StateCanceled {
+				rec.Job.State = StateFailed
+			}
+			p.mu.Unlock()
+			return err
+		}
+	}
+}
+
+func (p *Pipeline) finishCanceled(rec *jobRecord, err error) {
+	p.mu.Lock()
+	rec.Job.State = StateCanceled
+	if err != nil {
+		rec.Job.Error = err.Error()
+	}
+	p.mu.Unlock()
+}
+
+func (p *Pipeline) execute(ctx context.Context, rec *jobRecord) error {
+	switch rec.Job.Kind {
+	case KindUpload:
+		return p.processKey(ctx, rec, model.ObjectKey(rec.Job.ObjectKey), rec.filename, "")
+	case KindFetch:
+		return p.executeFetch(ctx, rec)
+	default:
+		return fmt.Errorf("job: unknown kind %q", rec.Job.Kind)
+	}
+}
+
+func (p *Pipeline) executeFetch(ctx context.Context, rec *jobRecord) error {
+	if rec.fetch == nil {
+		return errors.New("job: fetch input missing")
+	}
+	in := *rec.fetch
+	src, err := openSource(in)
+	if err != nil {
+		return err
+	}
+	results, err := acquire.IngestSource(ctx, p.deps.Store, in.CollectionID, src, in.IdempotencyPrefix)
+	if err != nil {
+		return err
+	}
+	p.setProgress(rec, "fetch", 0, len(results))
+	for i, res := range results {
+		name := filenameOf(res.SourceURI)
+		if err := p.processKey(ctx, rec, res.Meta.Key, name, res.SourceURI); err != nil {
+			return err
+		}
+		p.setProgress(rec, "index", i+1, len(results))
+	}
+	return nil
+}
+
+func openSource(in FetchInput) (acquire.Source, error) {
+	switch in.Kind {
+	case acquire.KindLocalDir:
+		return acquire.NewLocalDir(in.URI)
+	case acquire.KindHTTP:
+		return acquire.NewHTTP(in.URI, nil)
+	case acquire.KindDatabase:
+		return acquire.NewDatabase(in.URI)
+	case acquire.KindSitemap:
+		return acquire.NewSitemap(in.URI)
+	case acquire.KindVendorAPI:
+		return acquire.NewVendorAPI(in.URI)
+	default:
+		return nil, fmt.Errorf("job: unknown source kind %q", in.Kind)
+	}
+}
+
+func (p *Pipeline) processKey(ctx context.Context, rec *jobRecord, key model.ObjectKey, filename, sourceURI string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if key == "" {
+		return errors.New("job: empty object key")
+	}
+	if p.hasCheckpoint(rec, key) {
+		return nil
+	}
+	doc, ok := p.cachedDoc(rec, key)
+	if !ok {
+		p.setProgress(rec, "clean", 0, 1)
+		rc, meta, err := p.deps.Store.Get(ctx, key)
+		if err != nil {
+			return err
+		}
+		if rec.Job.Checksum != "" && meta.Checksum != "" && string(meta.Checksum) != rec.Job.Checksum {
+			rc.Close()
+			return storage.ErrChecksumMismatch
+		}
+		if filename == "" {
+			filename = rec.filename
+		}
+		doc, err = p.deps.Cleaner.Clean(ctx, clean.Input{
+			CollectionID: model.CollectionID(rec.Job.CollectionID),
+			ObjectKey:    key,
+			SourceURI:    sourceURI,
+			Filename:     filename,
+			Body:         rc,
+		})
+		rc.Close()
+		if err != nil {
+			return err
+		}
+		if doc.CollectionID == "" {
+			doc.CollectionID = model.CollectionID(rec.Job.CollectionID)
+		}
+		p.cacheDoc(rec, key, doc)
+	}
+	if !doc.Duplicate {
+		chunks, err := p.chunksFor(doc, splitNormal, nil)
+		if err != nil {
+			return err
+		}
+		if len(chunks) > 0 {
+			p.setProgress(rec, "embed", 0, 1)
+			texts := make([]string, len(chunks))
+			for i, ch := range chunks {
+				texts[i] = ch.Text
+			}
+			vecs, err := p.embedAll(ctx, texts)
+			if err != nil {
+				return err
+			}
+			idx, err := p.deps.Registry.Open(ctx, doc.CollectionID)
+			if err != nil {
+				return err
+			}
+			if err := idx.Upsert(ctx, chunks, vecs); err != nil {
+				return err
+			}
+			ids := make([]model.ChunkID, len(chunks))
+			for i, ch := range chunks {
+				ids[i] = ch.ID
+			}
+			doc.Lineage.ChunkIDs = ids
+			p.cacheDoc(rec, key, doc)
+		}
+	}
+	p.addDoc(doc)
+	p.setProgress(rec, "index", 1, 1)
+	return p.markCheckpoint(rec, key)
+}
+
+func (p *Pipeline) hasCheckpoint(rec *jobRecord, key model.ObjectKey) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var cp objectCheckpoint
+	if len(rec.Job.Checkpoint) == 0 {
+		return false
+	}
+	if err := json.Unmarshal(rec.Job.Checkpoint, &cp); err != nil {
+		return false
+	}
+	for _, item := range cp.ObjectKeys {
+		if item == string(key) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Pipeline) markCheckpoint(rec *jobRecord, key model.ObjectKey) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var cp objectCheckpoint
+	if len(rec.Job.Checkpoint) > 0 {
+		if err := json.Unmarshal(rec.Job.Checkpoint, &cp); err != nil {
+			return err
+		}
+	}
+	for _, item := range cp.ObjectKeys {
+		if item == string(key) {
+			return nil
+		}
+	}
+	cp.ObjectKeys = append(cp.ObjectKeys, string(key))
+	raw, err := json.Marshal(cp)
+	if err != nil {
+		return err
+	}
+	rec.Job.Checkpoint = raw
+	return nil
+}
+
+func (p *Pipeline) cachedDoc(rec *jobRecord, key model.ObjectKey) (model.Document, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	doc, ok := rec.cleaned[key]
+	return doc, ok
+}
+
+func (p *Pipeline) cacheDoc(rec *jobRecord, key model.ObjectKey, doc model.Document) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if rec.cleaned == nil {
+		rec.cleaned = map[model.ObjectKey]model.Document{}
+	}
+	rec.cleaned[key] = doc
+}
+
+func (p *Pipeline) addDoc(doc model.Document) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	list := p.docs[doc.CollectionID]
+	for _, existing := range list {
+		if existing.ID == doc.ID && existing.Duplicate == doc.Duplicate && existing.Lineage.RawObjectKey == doc.Lineage.RawObjectKey {
+			return
+		}
+	}
+	p.docs[doc.CollectionID] = append(list, doc)
+}
+
+func (p *Pipeline) setProgress(rec *jobRecord, stage string, done, total int) {
+	if done > total {
+		done = total
+	}
+	p.mu.Lock()
+	rec.Job.Progress = Progress{Stage: stage, Done: done, Total: total}
+	p.mu.Unlock()
+}
+
+func (p *Pipeline) snapshot(rec *jobRecord) Job {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return cloneJob(rec.Job)
+}
+
+func (p *Pipeline) maxAttempts() int {
+	if p.cfg.Retry.MaxAttempts > 0 {
+		return p.cfg.Retry.MaxAttempts
+	}
+	return defaultAttempts
+}
+
+func (p *Pipeline) acquire(ctx context.Context) error {
+	if p.sem == nil {
+		return nil
+	}
+	select {
+	case p.sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (p *Pipeline) release() {
+	if p.sem == nil {
+		return
+	}
+	<-p.sem
+}
+
+func cloneJob(job Job) Job {
+	if job.Checkpoint != nil {
+		job.Checkpoint = append(json.RawMessage(nil), job.Checkpoint...)
+	}
+	return job
+}
+
+func newID() string {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return fmt.Sprintf("job_%d", time.Now().UnixNano())
+	}
+	return "job_" + hex.EncodeToString(buf[:])
+}
+
+func newObjectKey(col model.CollectionID, filename string) model.ObjectKey {
+	var buf [8]byte
+	_, _ = rand.Read(buf[:])
+	name := strings.TrimSpace(filename)
+	if name == "" {
+		name = "object"
+	}
+	name = strings.NewReplacer("/", "_", "\\", "_").Replace(name)
+	return model.ObjectKey(fmt.Sprintf("raw/%s/%s-%s", col, hex.EncodeToString(buf[:]), name))
+}
+
+func filenameOf(uri string) string {
+	uri = strings.TrimRight(uri, "/")
+	if i := strings.LastIndex(uri, "/"); i >= 0 && i < len(uri)-1 {
+		return uri[i+1:]
+	}
+	if uri == "" {
+		return "object"
+	}
+	return uri
 }

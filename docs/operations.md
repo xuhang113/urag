@@ -1,0 +1,77 @@
+# 运行
+
+在仓库根目录执行。密钥只放在环境变量里，下面的示例值都是假的。
+
+## 环境变量
+
+| 变量 | 作用 | 默认或示例 |
+| --- | --- | --- |
+| `URAG_ADDR` | 监听地址 | `:8080` |
+| `URAG_DATA_DIR` | 本地对象目录 | `./data` |
+| `URAG_STORAGE` | `local` 或 `s3` | `local` |
+| `URAG_S3_ENDPOINT` | S3 兼容端点 | 假地址，仅 `s3` 时使用 |
+| `URAG_S3_REGION` | 区域 | 假区域 |
+| `URAG_S3_BUCKET` | 桶 | 假桶名 |
+| `URAG_S3_ACCESS_KEY` | 访问密钥变量 | 假密钥 |
+| `URAG_S3_SECRET_KEY` | 私密密钥变量 | 假密钥 |
+| `URAG_S3_PATH_STYLE` | `1` / `true` / `TRUE` / `True` 时打开路径风格 | `true` |
+| `URAG_EMBED_ENDPOINT` | 留空则用 64 维夹具嵌入；有值才用 HTTP 嵌入 | 假地址 |
+| `URAG_EMBED_MODEL` | HTTP 嵌入的模型名 | 假模型名 |
+| `URAG_EMBED_API_KEY` | HTTP 嵌入读取的密钥；程序只保存变量名 | 假密钥 |
+| `URAG_EMBED_BATCH_SIZE` | 嵌入批大小 | `16` |
+| `URAG_EMBED_CONCURRENCY` | HTTP 嵌入并发 | `2` |
+| `URAG_CLEAN_CONCURRENCY` | 清洗并发上限 | `2` |
+| `URAG_UPLOAD_CONCURRENCY` | 同时运行的上传任务数 | `2` |
+| `URAG_PART_SIZE` | S3 分片大小，字节 | `5242880` |
+| `URAG_RETRY_MAX` | 失败尝试次数，含第一次 | `3` |
+| `URAG_VECTOR_WEIGHT` | 混合分数里的向量权重 | `0.7` |
+| `URAG_KEYWORD_WEIGHT` | 混合分数里的关键词权重 | `0.3` |
+| `URAG_CHUNK_MAX_LEN` | 片段最大字节 | `800` |
+| `URAG_CHUNK_OVERLAP` | 相邻片段重叠字节 | `100` |
+| `URAG_FIXTURE` | 召回夹具路径 | `testdata/recall/fixture.json` |
+| `URAG_INLINE_JOBS` | `true` 时任务在接口返回前跑完 | `false` |
+
+`URAG_STORAGE=s3` 且端点、桶或密钥缺失时，进程退出并提示，不会伪造客户端。未设置 `URAG_EMBED_ENDPOINT` 时不会访问嵌入服务。
+
+占位示例见仓库根目录的 `.env.example`。不要把真实密钥写进这个文件。
+
+## 测试
+
+```bash
+go test ./...
+```
+
+任务管道单独跑：
+
+```bash
+go test ./internal/job/
+```
+
+测试不访问外网。页面测试使用 `httptest`，不监听真实端口。存储、嵌入和索引在本分支仍返回未实现时，五个页面测试会失败；`go test ./internal/job/` 使用测试里的假依赖，应当通过。
+
+## 验收页
+
+```bash
+go run ./cmd/urag serve
+```
+
+默认地址是 `:8080`。浏览器打开：
+
+- http://127.0.0.1:8080/upload
+- http://127.0.0.1:8080/fetch
+- http://127.0.0.1:8080/clean
+- http://127.0.0.1:8080/ask
+- http://127.0.0.1:8080/eval
+
+`GET /` 跳到 `/upload`。
+
+上传页提交集合、幂等键和文件，页面上能看到对象键、校验和和任务编号。获取页可选本地目录或 URL。清洗页按集合显示正文，重复文档会标出指向。提问页按集合显示片段、分数、集合编号和 Start/End。评价页显示每个集合的 Recall@K 和 MRR，包括正常结果和对照。
+
+对应 JSON：
+
+- `POST /api/uploads`
+- `POST /api/fetch`
+- `GET /api/jobs/{id}`
+- `GET /api/collections/{id}/documents`
+- `POST /api/retrieve`
+- `POST /api/eval` 和 `GET /api/eval/report`
