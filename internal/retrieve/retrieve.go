@@ -266,7 +266,7 @@ func sortHits(hits []Hit) {
 // 子块嵌入文本是 heading_path + "\n" + body；标题路径为空时只有 body。
 // 重排只产出分数。parents 为 nil，或父块查不到时，Hit.Text 保持子块 body。
 // 未点名的集合不会被打开。不使用服务里原来的 Reranker。
-// 调用方要在嵌入结束并关掉嵌入模型之后，再让重排模型开始打分。
+// 嵌入进程还占着模型闸时，不启动重排模型，沿用合并后的分数。
 func (s *service) RetrieveChildren(ctx context.Context, req Request, rerank PassageReranker, parents ParentLookup) ([]Hit, error) {
 	if s == nil {
 		return nil, errors.New("retrieve: nil service")
@@ -289,13 +289,28 @@ func (s *service) RetrieveChildren(ctx context.Context, req Request, rerank Pass
 
 	queryText := embed.QueryText(req.Query)
 	ctx = bindModelSteps(ctx)
-	// 先标成未完成。模型闸被收录占用时，这一步会一直停在这里，直到嵌入进程真正启动。
-	Report(ctx, StepLoadEmbed, false)
+	warm := false
+	if session, ok := s.emb.(embed.ForwardSession); ok && session.Loaded() {
+		warm = true
+	}
+	if warm {
+		// 权重已经在这个进程里。不要再写「加载嵌入模型」。
+		Report(ctx, StepEmbedResident, false)
+		Report(ctx, StepEmbedResident, true)
+		Report(ctx, StepQueryVector, false)
+	} else {
+		// 先标成未完成。模型闸被收录占用时，这一步会一直停在这里，直到嵌入进程真正启动。
+		Report(ctx, StepLoadEmbed, false)
+	}
 	vecs, err := s.emb.Embed(ctx, []string{queryText})
 	if err != nil {
 		return nil, err
 	}
-	if !StepDone(ctx, StepQueryVector) {
+	if warm {
+		if !StepDone(ctx, StepQueryVector) {
+			Report(ctx, StepQueryVector, true)
+		}
+	} else if !StepDone(ctx, StepQueryVector) {
 		Report(ctx, StepLoadEmbed, true)
 		Report(ctx, StepQueryVector, true)
 	}
@@ -378,16 +393,9 @@ func (s *service) RetrieveChildren(ctx context.Context, req Request, rerank Pass
 	for i := range merged {
 		passages[i] = childEmbedText(merged[i].HeadingPath, merged[i].Text)
 	}
-	if len(passages) > 0 {
-		Report(ctx, StepLoadRerank, false)
-	}
-	scores, err := rerank.Score(ctx, queryText, passages)
+	scores, err := s.scoreChildren(ctx, rerank, queryText, passages, merged)
 	if err != nil {
 		return nil, err
-	}
-	if len(passages) > 0 && !StepDone(ctx, StepRerank) {
-		Report(ctx, StepLoadRerank, true)
-		Report(ctx, StepRerank, true)
 	}
 	if len(scores) != len(passages) {
 		return nil, fmt.Errorf("retrieve: reranker returned %d scores for %d passages", len(scores), len(passages))
@@ -406,6 +414,41 @@ func (s *service) RetrieveChildren(ctx context.Context, req Request, rerank Pass
 		merged = []Hit{}
 	}
 	return applyParents(ctx, merged, parents)
+}
+
+func (s *service) scoreChildren(ctx context.Context, rerank PassageReranker, queryText string, passages []string, merged []Hit) ([]float64, error) {
+	plan, planned := rerankPlanFrom(ctx)
+	if planned && plan.SkipModel {
+		if len(passages) == 0 {
+			return []float64{}, nil
+		}
+		// 重排前已经记下嵌入进程。它还在时不再启动第二个大模型。
+		if plan.EmbedPID < 0 {
+			return nil, errors.New("retrieve: embed process was not noted")
+		}
+		if plan.Park != nil {
+			plan.Park(ctx)
+		}
+		Report(ctx, StepRerank, false)
+		scores := make([]float64, len(merged))
+		for i := range merged {
+			scores[i] = merged[i].Score
+		}
+		Report(ctx, StepRerank, true)
+		return scores, nil
+	}
+	if len(passages) > 0 {
+		Report(ctx, StepLoadRerank, false)
+	}
+	scores, err := rerank.Score(ctx, queryText, passages)
+	if err != nil {
+		return nil, err
+	}
+	if len(passages) > 0 && !StepDone(ctx, StepRerank) {
+		Report(ctx, StepLoadRerank, true)
+		Report(ctx, StepRerank, true)
+	}
+	return scores, nil
 }
 
 func mergeChildHits(col model.CollectionID, vecHits, kwHits []index.Hit, w Weights) ([]Hit, error) {

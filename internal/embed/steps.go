@@ -26,3 +26,11 @@ func EmitStep(ctx context.Context, token string) {
 		fn(token)
 	}
 }
+
+func hasStepHandler(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	fn, _ := ctx.Value(stepHandlerKey{}).(func(string))
+	return fn != nil
+}

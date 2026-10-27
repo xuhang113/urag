@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -340,6 +341,209 @@ func (p parentBody) GetParent(ctx context.Context, id int64) (string, error) {
 type phaseReranker struct {
 	emb   *phaseEmbedder
 	score float64
+}
+
+func TestTryKeepsEmbedAndSkipsSecondModel(t *testing.T) {
+	emb := &residentEmbedder{inner: embed.NewFixture(8), pid: os.Getpid(), holding: true}
+	rr := &countReranker{}
+	h := residentTryHandler(t, emb, rr, retrieve.DefaultRerankMinScore, true)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	first := &lockedBuffer{}
+	if err := readTryStream(ctx, srv.URL+"/api/try", "crimson lantern", first); err != nil {
+		t.Fatal(err)
+	}
+	assertStepOrder(t, first.String(), []string{
+		retrieve.StepLoadEmbed,
+		retrieve.StepQueryVector,
+		retrieve.StepVectorSearch,
+		retrieve.StepBM25,
+		retrieve.StepMergeTop50,
+		retrieve.StepParkEmbed,
+		retrieve.StepRerank,
+		retrieve.StepFilter(retrieve.DefaultRerankMinScore),
+		retrieve.StepParents,
+	})
+	if strings.Contains(first.String(), retrieve.StepEmbedResident) || strings.Contains(first.String(), retrieve.StepUnloadEmbed) || strings.Contains(first.String(), retrieve.StepLoadRerank) {
+		t.Fatalf("first query reloaded or unloaded embed\n%s", first.String())
+	}
+	if !strings.Contains(first.String(), `"collection_id":"public"`) {
+		t.Fatalf("result %s", first.String())
+	}
+
+	second := &lockedBuffer{}
+	if err := readTryStream(ctx, srv.URL+"/api/try", "crimson lantern", second); err != nil {
+		t.Fatal(err)
+	}
+	assertStepOrder(t, second.String(), []string{
+		retrieve.StepEmbedResident,
+		retrieve.StepQueryVector,
+		retrieve.StepVectorSearch,
+		retrieve.StepBM25,
+		retrieve.StepMergeTop50,
+		retrieve.StepRerank,
+		retrieve.StepFilter(retrieve.DefaultRerankMinScore),
+		retrieve.StepParents,
+	})
+	if strings.Contains(second.String(), retrieve.StepLoadEmbed) || strings.Contains(second.String(), retrieve.StepParkEmbed) || strings.Contains(second.String(), retrieve.StepLoadRerank) {
+		t.Fatalf("second query reloaded embed or rerank\n%s", second.String())
+	}
+	if rr.n() != 0 {
+		t.Fatalf("rerank model started %d times", rr.n())
+	}
+	if emb.wasClosed() {
+		t.Fatal("embedder closed after the queries")
+	}
+}
+
+func TestResidentTryDropsBelowThreshold(t *testing.T) {
+	emb := &residentEmbedder{inner: embed.NewFixture(8), pid: os.Getpid(), holding: true}
+	rr := &countReranker{}
+	h := residentTryHandler(t, emb, rr, 10, true)
+	raw, err := json.Marshal(map[string]any{"query": "crimson lantern"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/try", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	got := httptest.NewRecorder()
+	h.ServeHTTP(got, req)
+	if got.Code != http.StatusOK {
+		t.Fatalf("status %d %s", got.Code, got.Body.String())
+	}
+	if strings.TrimSpace(got.Body.String()) == "null" {
+		t.Fatal("null hits")
+	}
+	var hits []retrieve.Hit
+	if err := json.Unmarshal(got.Body.Bytes(), &hits); err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("hits %+v", hits)
+	}
+	if rr.n() != 0 || emb.wasClosed() {
+		t.Fatalf("calls %d closed %v", rr.n(), emb.wasClosed())
+	}
+}
+
+func residentTryHandler(t *testing.T, emb *residentEmbedder, passages retrieve.PassageReranker, min float64, park bool) http.Handler {
+	t.Helper()
+	ctx := context.Background()
+	meta := embed.ModelMeta{Name: "fixture", Dim: 8}
+	reg, err := index.NewDisk(t.TempDir(), meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk := reg.(*index.Disk)
+	qvec := mustEmbed(t, embed.NewFixture(meta.Dim), embed.QueryText("crimson lantern"))
+	if err := disk.UpsertRecords(ctx, []index.VectorRecord{{
+		ChunkID: "c1", ParentID: 42, DocID: 7, CollectionID: "public",
+		HeadingPath: "东桥", Body: "crimson lantern east bridge",
+		StartByte: 3, EndByte: 9, Vector: qvec,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.NewLocal(t.TempDir(), storage.RetryPolicy{MaxAttempts: 3}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := job.New(job.Config{
+		DataDir:        t.TempDir(),
+		Weights:        retrieve.Weights{Vector: 0.7, Keyword: 0.3},
+		Chunk:          chunk.Options{MaxLen: 800, Overlap: 100},
+		RerankMinScore: min,
+		KeepEmbed:      true,
+		ParkEmbed:      park,
+	}, job.Deps{
+		Store:    store,
+		Embedder: emb,
+		Registry: reg,
+		Reranker: retrieve.NewOverlapReranker(),
+		Splitter: chunk.NewParagraph(),
+		Cleaner:  clean.New(clean.NewMemoryDeduper()),
+		Passages: passages,
+		Parents:  parentBody{42: "父节正文"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Handler(p)
+}
+
+type residentEmbedder struct {
+	inner   embed.Embedder
+	pid     int
+	holding bool
+	mu      sync.Mutex
+	loaded  bool
+	closed  bool
+}
+
+func (r *residentEmbedder) Dim() int { return r.inner.Dim() }
+
+func (r *residentEmbedder) Embed(ctx context.Context, texts []string) ([]embed.Vector, error) {
+	r.mu.Lock()
+	first := !r.loaded
+	r.mu.Unlock()
+	if first {
+		embed.EmitStep(ctx, "load_embed_done")
+	}
+	embed.EmitStep(ctx, "query_vector_done")
+	vecs, err := r.inner.Embed(ctx, texts)
+	if err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	r.loaded = true
+	r.mu.Unlock()
+	return vecs, nil
+}
+
+func (r *residentEmbedder) Loaded() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.loaded
+}
+
+func (r *residentEmbedder) ProcessID() int { return r.pid }
+
+func (r *residentEmbedder) Holding() bool { return r.holding }
+
+func (r *residentEmbedder) Close() error {
+	r.mu.Lock()
+	r.closed = true
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *residentEmbedder) wasClosed() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closed
+}
+
+type countReranker struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *countReranker) Score(ctx context.Context, _ string, passages []string) ([]float64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+	return nil, errors.New("rerank model started")
+}
+
+func (c *countReranker) n() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
 }
 
 func (p *phaseReranker) Score(ctx context.Context, _ string, passages []string) ([]float64, error) {

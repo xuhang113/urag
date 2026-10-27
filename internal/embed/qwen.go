@@ -47,6 +47,7 @@ type qwenEmbedder struct {
 	starting bool
 	stopped  bool
 	held     bool
+	loaded   bool
 }
 
 // NewQwen 只从 dir 读取本地 Qwen 嵌入权重。
@@ -109,6 +110,36 @@ func NewQwenCommand(dir string, meta ModelMeta, argv []string) (Embedder, error)
 
 func (q *qwenEmbedder) Dim() int { return qwenDim }
 
+func (q *qwenEmbedder) Loaded() bool {
+	if q == nil {
+		return false
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.loaded
+}
+
+func (q *qwenEmbedder) Holding() bool {
+	if q == nil {
+		return false
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.held
+}
+
+func (q *qwenEmbedder) ProcessID() int {
+	if q == nil {
+		return 0
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.proc == nil || q.proc.cmd == nil || q.proc.cmd.Process == nil {
+		return 0
+	}
+	return q.proc.cmd.Process.Pid
+}
+
 func (q *qwenEmbedder) Embed(ctx context.Context, texts []string) ([]Vector, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -157,7 +188,14 @@ func (q *qwenEmbedder) embedResident(ctx context.Context, proc *residentProc, pa
 	if err != nil {
 		return nil, err
 	}
-	return parseVectors(out, n)
+	vecs, err := parseVectors(out, n)
+	if err != nil {
+		return nil, err
+	}
+	q.mu.Lock()
+	q.loaded = true
+	q.mu.Unlock()
+	return vecs, nil
 }
 
 func (q *qwenEmbedder) payload(texts []string) ([]byte, error) {

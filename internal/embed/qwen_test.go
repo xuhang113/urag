@@ -379,6 +379,70 @@ func TestQwenResidentDoesNotRestartAfterExit(t *testing.T) {
 	}
 }
 
+func TestQwenResidentForwardsStepTokens(t *testing.T) {
+	dir := t.TempDir()
+	script := writeFile(t, filepath.Join(dir, "steps.py"), fakeResidentStepScript)
+	emb, err := embed.NewQwenCommand(writeQwenLayout(t, 2560), qwenMeta(), []string{pythonBin(t), script})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := emb.(interface {
+		Start(context.Context) error
+		Close() error
+		Loaded() bool
+		Holding() bool
+		ProcessID() int
+	})
+	var mu sync.Mutex
+	var tokens []string
+	ctx := embed.WithStepHandler(context.Background(), func(token string) {
+		mu.Lock()
+		tokens = append(tokens, token)
+		mu.Unlock()
+	})
+	if err := session.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	if session.ProcessID() <= 0 || !session.Holding() || session.Loaded() {
+		t.Fatalf("before pid %d holding %v loaded %v", session.ProcessID(), session.Holding(), session.Loaded())
+	}
+	if _, err := emb.Embed(ctx, []string{"alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	if !session.Loaded() {
+		t.Fatal("weights were not kept after the first batch")
+	}
+	mu.Lock()
+	first := strings.Join(tokens, ",")
+	mu.Unlock()
+	if first != "load_embed_done,query_vector_done" {
+		t.Fatalf("first tokens %s", first)
+	}
+	if _, err := emb.Embed(ctx, []string{"beta"}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	second := strings.Join(tokens, ",")
+	mu.Unlock()
+	if second != "load_embed_done,query_vector_done,query_vector_done" {
+		t.Fatalf("second tokens %s", second)
+	}
+	pid := session.ProcessID()
+	if !processAlive(pid) {
+		t.Fatal("embed process exited between batches")
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if session.Holding() {
+		t.Fatal("model gate still held")
+	}
+	if processAlive(pid) {
+		t.Fatal("embed process still alive after close")
+	}
+}
+
 func TestQwenResidentBlocksRerank(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "gate.log")
@@ -658,6 +722,30 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
     handle.write(req["model_dir"])
 dim = int(req["dim"])
 json.dump({"vectors": [[0.0] * dim]}, sys.stdout)
+`
+
+const fakeResidentStepScript = `
+import json, os, sys
+fd = int(os.environ["URAG_STEP_FD"])
+loaded = False
+
+def note(token):
+    os.write(fd, (token + "\n").encode())
+
+while True:
+    raw = sys.stdin.readline()
+    if raw == "":
+        break
+    req = json.loads(raw)
+    if not loaded:
+        note("load_embed_done")
+        loaded = True
+    note("query_vector_done")
+    dim = int(req["dim"])
+    row = [0.0] * dim
+    json.dump({"vectors": [row]}, sys.stdout)
+    sys.stdout.write("\n")
+    sys.stdout.flush()
 `
 
 const fakeResidentScript = `

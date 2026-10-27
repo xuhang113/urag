@@ -256,6 +256,17 @@ func TestTryDoesNotCreateVectors(t *testing.T) {
 	}
 }
 
+func TestParseVMStatFreePages(t *testing.T) {
+	text := "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                6047.\nPages inactive:                          10.\n"
+	pages, ok := parseVMStatFreePages(text)
+	if !ok || pages != 6047 {
+		t.Fatalf("pages %d ok %v", pages, ok)
+	}
+	if _, ok := parseVMStatFreePages("no free line"); ok {
+		t.Fatal("missing free line was accepted")
+	}
+}
+
 func TestTryCommandDoesNotWriteDSN(t *testing.T) {
 	body, err := os.ReadFile("try_cmd.go")
 	if err != nil {
@@ -270,8 +281,8 @@ func TestTryCommandDoesNotWriteDSN(t *testing.T) {
 	if !strings.Contains(text, "URAG_MYSQL_DSN") || !strings.Contains(text, "NewQwenReranker") {
 		t.Fatal("try command missing ledger or rerank hook")
 	}
-	if strings.Contains(text, ".Start(") {
-		t.Fatal("try keeps an embed process resident")
+	if !strings.Contains(text, "starter.Start(ctx)") || !strings.Contains(text, "KeepEmbed") || !strings.Contains(text, "ParkEmbed") {
+		t.Fatal("try does not keep one embed process for the server")
 	}
 }
 

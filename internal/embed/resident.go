@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
@@ -19,10 +21,21 @@ type residentProc struct {
 	stdin  io.WriteCloser
 	stdout *bufio.Reader
 	stderr *tailBuf
+	steps  chan string
 
 	call    sync.Mutex
 	once    sync.Once
 	waitErr error
+}
+
+// ForwardSession 是一次进程里常驻的本地嵌入。
+// Loaded 在权重完成过一次前向之后为 true。
+// ProcessID 是子进程号；没有子进程时为 0。
+// Holding 表示这个进程占着本地模型闸，不能再加载重排模型。
+type ForwardSession interface {
+	Loaded() bool
+	ProcessID() int
+	Holding() bool
 }
 
 // Start 启动嵌入进程并占住模型闸，直到 Close。
@@ -109,26 +122,66 @@ func startResident(ctx context.Context, argv []string) (*residentProc, error) {
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Env = forwardEnv()
+	steps, stepW, stepErr := residentStepPipe(cmd)
+	if stepErr != nil {
+		return nil, stepErr
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		closeStepWrite(stepW)
 		return nil, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
+		closeStepWrite(stepW)
 		return nil, err
 	}
 	stderr := &tailBuf{max: 8192}
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
+		closeStepWrite(stepW)
 		return nil, fmt.Errorf("embed: qwen forward: %w", err)
 	}
+	closeStepWrite(stepW)
 	return &residentProc{
 		cmd:    cmd,
 		stdin:  stdin,
 		stdout: bufio.NewReader(stdout),
 		stderr: stderr,
+		steps:  steps,
 	}, nil
+}
+
+func residentStepPipe(cmd *exec.Cmd) (chan string, *os.File, error) {
+	stepR, stepW, err := os.Pipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	cmd.ExtraFiles = []*os.File{stepW}
+	cmd.Env = append(cmd.Env, "URAG_STEP_FD=3")
+	steps := make(chan string, 32)
+	go readResidentSteps(stepR, steps)
+	return steps, stepW, nil
+}
+
+func closeStepWrite(f *os.File) {
+	if f != nil {
+		_ = f.Close()
+	}
+}
+
+func readResidentSteps(r *os.File, steps chan string) {
+	defer close(steps)
+	defer r.Close()
+	sc := bufio.NewScanner(r)
+	for sc.Scan() {
+		token := strings.TrimSpace(sc.Text())
+		if token == "" {
+			continue
+		}
+		steps <- token
+	}
 }
 
 func (p *residentProc) roundTrip(ctx context.Context, payload []byte) ([]byte, error) {
@@ -137,6 +190,18 @@ func (p *residentProc) roundTrip(ctx context.Context, payload []byte) ([]byte, e
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	stopped := make(chan struct{})
+	finished := make(chan struct{})
+	var stopOnce sync.Once
+	go func() {
+		defer close(finished)
+		p.relaySteps(ctx, stopped)
+	}()
+	stopRelay := func() {
+		stopOnce.Do(func() { close(stopped) })
+		<-finished
+	}
+	defer stopRelay()
 	if _, err := p.stdin.Write(payload); err != nil {
 		return nil, p.ioErr(ctx, err)
 	}
@@ -150,10 +215,70 @@ func (p *residentProc) roundTrip(ctx context.Context, payload []byte) ([]byte, e
 	})
 	defer stop()
 	line, err := readLineLimited(p.stdout, maxForwardBytes)
+	stopRelay()
 	if err != nil {
 		return nil, p.ioErr(ctx, err)
 	}
 	return line, nil
+}
+
+func (p *residentProc) relaySteps(ctx context.Context, stopped <-chan struct{}) {
+	if p == nil || p.steps == nil {
+		<-stopped
+		return
+	}
+	emit := hasStepHandler(ctx)
+	for {
+		select {
+		case <-stopped:
+			p.finishSteps(ctx, emit)
+			return
+		case token, ok := <-p.steps:
+			if !ok {
+				return
+			}
+			if emit {
+				EmitStep(ctx, token)
+			}
+		}
+	}
+}
+
+func (p *residentProc) finishSteps(ctx context.Context, emit bool) {
+	if p == nil || p.steps == nil {
+		return
+	}
+	for {
+		select {
+		case token, ok := <-p.steps:
+			if !ok {
+				return
+			}
+			if emit {
+				EmitStep(ctx, token)
+			}
+		default:
+			if !emit {
+				return
+			}
+			timer := time.NewTimer(100 * time.Millisecond)
+			select {
+			case token, ok := <-p.steps:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				if !ok {
+					return
+				}
+				EmitStep(ctx, token)
+			case <-timer.C:
+				return
+			}
+		}
+	}
 }
 
 func (p *residentProc) ioErr(ctx context.Context, cause error) error {

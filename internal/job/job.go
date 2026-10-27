@@ -154,6 +154,12 @@ type Config struct {
 	// 命中必须高于它才返回。生产进程从 URAG_RERANK_MIN_SCORE 读入，未设置时用 retrieve.DefaultRerankMinScore。
 	// 夹具评价走 Ask，不读这个字段。
 	RerankMinScore float64
+	// KeepEmbed 为 true 时，试查不在每次提问后关掉嵌入进程。
+	// urag try 在进程活着期间只加载一次嵌入模型。
+	KeepEmbed bool
+	// ParkEmbed 为 true 时，内存放不下嵌入和重排两个模型。
+	// 第一次重排前写一次取舍，之后的提问不再写。重排用已有分数门槛。
+	ParkEmbed bool
 }
 
 // VectorWriter 按批把子块向量写入磁盘索引。
@@ -186,11 +192,13 @@ type Pipeline struct {
 	deps Deps
 	svc  retrieve.Service
 
-	mu    sync.Mutex
-	tryMu sync.Mutex
-	jobs  map[string]*jobRecord
-	docs  map[model.CollectionID][]model.Document
-	sem   chan struct{}
+	mu            sync.Mutex
+	tryMu         sync.Mutex
+	notedEmbedPID int
+	parked        bool
+	jobs          map[string]*jobRecord
+	docs          map[model.CollectionID][]model.Document
+	sem           chan struct{}
 }
 
 type jobRecord struct {

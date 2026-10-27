@@ -11,6 +11,8 @@ import (
 const (
 	// StepLoadEmbed 从开始等待嵌入模型到权重进入内存。
 	StepLoadEmbed = "加载嵌入模型"
+	// StepEmbedResident 表示权重已经在这次试查进程里，这次提问不再加载。
+	StepEmbedResident = "嵌入模型已在内存"
 	// StepQueryVector 是查询向量的前向，发生在模型已经加载之后。
 	StepQueryVector = "计算查询向量"
 	// StepVectorSearch 是磁盘或内存上的向量检索。
@@ -21,7 +23,10 @@ const (
 	StepMergeTop50 = "合并前 50 条"
 	// StepUnloadEmbed 是嵌入进程退出。它发生在向量检索之前，因为查询向量一返回进程就退出。
 	StepUnloadEmbed = "退出嵌入模型"
-	// StepLoadRerank 是重排权重进入内存。嵌入进程已经退出。
+	// StepParkEmbed 是内存放不下嵌入和重排两个模型时，第一次重排前写下的取舍。
+	// 嵌入进程继续留着，这次不再启动重排模型。
+	StepParkEmbed = "为重排暂时卸下嵌入"
+	// StepLoadRerank 是重排权重进入内存。嵌入进程没有占着模型闸时才会发生。
 	StepLoadRerank = "加载重排模型"
 	// StepRerank 是对这 50 条打分。
 	StepRerank = "重排"
@@ -114,6 +119,33 @@ func bindModelSteps(ctx context.Context) context.Context {
 	return embed.WithStepHandler(parent, func(token string) {
 		noteModelStep(parent, token)
 	})
+}
+
+// RerankPlan 告诉这次查询怎么处理重排。
+// SkipModel 为 true 时不启动重排模型。EmbedPID 是重排前记下的嵌入进程，没有则为 0。
+// Park 在第一次需要说明取舍时写页面日志，之后由调用方自己跳过。
+type RerankPlan struct {
+	SkipModel bool
+	EmbedPID  int
+	Park      func(context.Context)
+}
+
+type rerankPlanKey struct{}
+
+// WithRerankPlan 把这次查询的重排取舍放进上下文。
+func WithRerankPlan(ctx context.Context, plan RerankPlan) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, rerankPlanKey{}, plan)
+}
+
+func rerankPlanFrom(ctx context.Context) (RerankPlan, bool) {
+	if ctx == nil {
+		return RerankPlan{}, false
+	}
+	plan, ok := ctx.Value(rerankPlanKey{}).(RerankPlan)
+	return plan, ok
 }
 
 func noteModelStep(ctx context.Context, token string) {
