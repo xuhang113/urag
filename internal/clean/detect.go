@@ -23,6 +23,11 @@ func detectMedia(filename string, raw []byte) (string, error) {
 		return "html", nil
 	case ".pdf":
 		return "pdf", nil
+	case ".docx":
+		if isDocx(raw) {
+			return "docx", nil
+		}
+		return "", ErrUnsupportedType
 	}
 	trimmed := bytes.TrimSpace(raw)
 	if bytes.HasPrefix(trimmed, []byte("%PDF")) {
@@ -30,6 +35,9 @@ func detectMedia(filename string, raw []byte) (string, error) {
 	}
 	if looksLikeHTML(trimmed) {
 		return "html", nil
+	}
+	if isDocx(trimmed) {
+		return "docx", nil
 	}
 	return "", ErrUnsupportedType
 }

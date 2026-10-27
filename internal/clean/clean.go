@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	// ErrUnsupportedType 表示媒体类型不是 txt、md、html 或 pdf。
+	// ErrUnsupportedType 表示媒体类型不是 txt、md、html、pdf 或 docx。
 	ErrUnsupportedType = errors.New("clean: unsupported type")
 
 	// ErrNotImplemented 保留给旧调用方识别未接通的桩。接通后的 Clean 不再返回它。
@@ -44,8 +44,9 @@ type Deduper interface {
 
 // Cleaner 把原始对象变成一篇文档。
 type Cleaner interface {
-	// Clean 支持 txt、md、html、pdf。识别编码并输出 UTF-8，Document.Text 即这份正文。
-	// 去掉 nav、header、footer 和重复模板。
+	// Clean 支持 txt、md、html、pdf、docx。识别编码并输出 UTF-8，Document.Text 即这份正文。
+	// html 保留正文标题，docx 按标题样式，两者都写成 markdown 标题行，正文段落之间空一行。
+	// 去掉 nav、header、footer 和重复模板。docx 只在内存里读 zip，不把文件写入存储。
 	// 按正文哈希在集合内去重。重复时 Document.Duplicate 为 true，
 	// Lineage.DuplicateOf 指向已有文档，这篇不进入索引。
 	// Lineage.Steps 按顺序保留每一步，Name 取 detect、strip、dedupe。
@@ -83,9 +84,12 @@ func (c cleaner) Clean(ctx context.Context, in Input) (model.Document, error) {
 		return model.Document{}, err
 	}
 	var text, enc string
-	if media == "pdf" {
+	switch media {
+	case "pdf":
 		text, enc, err = extractPDF(raw)
-	} else {
+	case "docx":
+		text, enc, err = extractDOCX(raw)
+	default:
 		text, enc, err = decodeText(raw)
 	}
 	if err != nil {

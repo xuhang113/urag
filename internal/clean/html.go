@@ -15,10 +15,59 @@ func stripHTML(s string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	var b strings.Builder
+	var blocks []string
 	var removed []string
-	extractHTML(doc, &b, &removed)
-	text := normalizeHTMLText(b.String())
+	var inline strings.Builder
+	flushInline := func() {
+		text := cleanBlock(inline.String())
+		inline.Reset()
+		if text != "" {
+			blocks = append(blocks, text)
+		}
+	}
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type == html.ElementNode {
+			if why, drop := dropReason(n); drop {
+				removed = append(removed, why)
+				return
+			}
+			// 标题单独成 markdown 行，后面的切分才认得出节。
+			if level, ok := headingLevel(n.Data); ok {
+				flushInline()
+				if text := oneLine(innerText(n, &removed)); text != "" {
+					blocks = append(blocks, strings.Repeat("#", level)+" "+text)
+				}
+				return
+			}
+			if isParagraphTag(n.Data) {
+				flushInline()
+				if text := cleanBlock(innerText(n, &removed)); text != "" {
+					blocks = append(blocks, text)
+				}
+				return
+			}
+			if n.Data == "br" {
+				inline.WriteByte('\n')
+				return
+			}
+		}
+		if n.Type == html.TextNode {
+			inline.WriteString(n.Data)
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+		if n.Type == html.ElementNode && isBlock(n.Data) {
+			flushInline()
+		}
+	}
+	walk(doc)
+	flushInline()
+	text := strings.Join(blocks, "\n\n")
 	detail := fmt.Sprintf("removed=%s bytes=%d", joinUnique(removed), len(text))
 	if len(removed) == 0 {
 		detail = fmt.Sprintf("removed=none bytes=%d", len(text))
@@ -26,25 +75,69 @@ func stripHTML(s string) (string, string, error) {
 	return text, detail, nil
 }
 
-func extractHTML(n *html.Node, b *strings.Builder, removed *[]string) {
-	if n == nil {
-		return
-	}
-	if n.Type == html.ElementNode {
-		if why, drop := dropReason(n); drop {
-			*removed = append(*removed, why)
-			return
+func innerText(n *html.Node, removed *[]string) string {
+	var b strings.Builder
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			if why, drop := dropReason(n); drop {
+				if removed != nil {
+					*removed = append(*removed, why)
+				}
+				return
+			}
+			if n.Data == "br" {
+				b.WriteByte('\n')
+				return
+			}
+		}
+		if n.Type == html.TextNode {
+			b.WriteString(n.Data)
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
 		}
 	}
-	if n.Type == html.TextNode {
-		b.WriteString(n.Data)
+	walk(n)
+	return b.String()
+}
+
+func headingLevel(tag string) (int, bool) {
+	switch tag {
+	case "h1", "h2", "h3", "h4", "h5", "h6":
+		return int(tag[1] - '0'), true
+	default:
+		return 0, false
 	}
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		extractHTML(c, b, removed)
+}
+
+func isParagraphTag(tag string) bool {
+	switch tag {
+	case "p", "pre", "blockquote", "figcaption", "address", "dd", "dt":
+		return true
+	default:
+		return false
 	}
-	if n.Type == html.ElementNode && isBlock(n.Data) {
-		b.WriteByte('\n')
+}
+
+func oneLine(s string) string {
+	s = strings.ReplaceAll(s, "\u00a0", " ")
+	return strings.Join(strings.Fields(s), " ")
+}
+
+func cleanBlock(s string) string {
+	s = strings.ReplaceAll(s, "\u00a0", " ")
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	var kept []string
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		kept = append(kept, line)
 	}
+	return strings.Join(kept, "\n")
 }
 
 func dropReason(n *html.Node) (string, bool) {
@@ -81,21 +174,6 @@ func isBlock(tag string) bool {
 	default:
 		return false
 	}
-}
-
-func normalizeHTMLText(s string) string {
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	s = strings.ReplaceAll(s, "\u00a0", " ")
-	lines := strings.Split(s, "\n")
-	kept := make([]string, 0, len(lines))
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		kept = append(kept, line)
-	}
-	return strings.Join(kept, "\n")
 }
 
 func joinUnique(items []string) string {
