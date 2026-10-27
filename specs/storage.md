@@ -4,7 +4,7 @@
 
 提供按对象键存放原文的契约。写入和读取都是流。复制缓冲不超过 `storage.CopyBufSize`（32 KiB）。写入时计算小写十六进制 SHA-256。校验和与大小一致后才提交元数据。先写临时键，提交成功后对象才可见。
 
-同一个非空幂等键的第二次写入返回第一次的 `ObjectMeta`，不产生第二份对象。可重试错误按 `RetryPolicy` 做有限次退避。`MaxAttempts` 包含第一次调用。
+同一集合内，同一个非空幂等键的第二次写入返回第一次的 `ObjectMeta`，不产生第二份对象。可重试错误按 `RetryPolicy` 做有限次退避。`MaxAttempts` 包含第一次调用。小于 1 时按 3 次。`BaseDelay` 为 0 时不休眠。
 
 分片上传中断后，`ListParts` 仍返回已完成分片。调用方只补缺失分片，再 `CompleteMultipart`。
 
@@ -25,7 +25,7 @@
 - `PutOptions.ExpectedChecksum` 为空时只计算；非空且不符时返回 `ErrChecksumMismatch`。
 - `MultipartSession` 在提交前不可见。`Part` 含分片号、大小、校验和、ETag。
 - `Hook.OnCommit` 的 attempt 从 1 开始。返回错误则对象不可见。hook 为空时照常提交。
-- `Local.CommitAttempts` 在接通前为 0。`NewLocal` 与 `NewS3` 在接通前返回 `ErrNotImplemented`。
+- `Local.CommitAttempts` 等于已经进入提交步骤的次数。校验和不符、上下文取消和幂等命中不进入提交。`NewLocal` 在目录上提供上述保证。`NewS3` 缺少端点、区域、桶或密钥时返回错误，不创建客户端。
 
 ## 测试
 

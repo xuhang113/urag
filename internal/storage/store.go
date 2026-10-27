@@ -1,12 +1,17 @@
 // Package storage 定义原始对象的流式存放契约。
 // 本包负责校验和、幂等键、分片和有限次退避。
 // 本包不解析正文，不清洗，不建索引，也不导出云厂商客户端类型。
+// 本地目录和自定义端点上的对象存储都实现 Store。
+// 密钥只来自调用方或环境变量，不会写入日志、错误或仓库。
 package storage
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/xuhang113/urag/internal/model"
@@ -27,7 +32,8 @@ var (
 	// ErrRetryable 表示这次失败可以按 RetryPolicy 退避后重试。
 	ErrRetryable = errors.New("storage: retryable")
 
-	// ErrNotImplemented 表示存储尚未接通。
+	// ErrNotImplemented 表示这项存储能力尚未接通。
+	// 有效的本地目录和对象存储配置不会返回它。
 	ErrNotImplemented = errors.New("storage: not implemented")
 )
 
@@ -90,7 +96,7 @@ type Hook interface {
 // 读写都是流式的，不把整个对象读进内存，复制缓冲不超过 CopyBufSize。
 // 写入时计算 SHA-256。元数据在校验和与大小一致后才提交。
 // 先写临时键，提交成功后对象才可见。
-// 同一个非空幂等键的第二次调用返回第一次的 ObjectMeta，不产生第二份对象。
+// 同一集合内，同一个非空幂等键的第二次调用返回第一次的 ObjectMeta，不产生第二份对象。
 // 可重试错误按 RetryPolicy 做有限次退避。
 // ErrChecksumMismatch、context.Canceled、context.DeadlineExceeded 不重试。
 // 分片中断后 ListParts 仍能看到已完成分片，调用方只补缺失分片。
@@ -131,20 +137,6 @@ type Store interface {
 	// AbortMultipart 丢弃会话。之后对象不可见。
 	// 会话不存在时返回 ErrNotFound。
 	AbortMultipart(ctx context.Context, session MultipartSession) error
-}
-
-// Local 是本地目录存储的具体类型。
-// 写入尚未接通。
-type Local struct{}
-
-// CommitAttempts 返回已经提交成功的次数。桩固定返回 0。
-func (Local) CommitAttempts() int { return 0 }
-
-// NewLocal 准备目录 dir 上的本地存储。
-// policy 控制可重试错误的退避。hook 观察提交，可以为空。
-// 当前返回 ErrNotImplemented，不创建目录，也不写入文件。
-func NewLocal(dir string, policy RetryPolicy, hook Hook) (Store, error) {
-	return nil, ErrNotImplemented
 }
 
 // S3Config 是通用对象存储的连接参数。
@@ -189,8 +181,39 @@ func s3PathStyle(v string) bool {
 	}
 }
 
-// NewS3 按 cfg 准备对象存储。
-// 当前返回 ErrNotImplemented，不连接端点，也不伪造可用客户端。
+// NewS3 按 cfg 准备对象存储，不在这里拨号。
+// Endpoint、Region、Bucket、AccessKey、SecretKey 任一为空，或 Endpoint 不是带主机的 http(s) 地址时返回错误。
+// 错误里不包含密钥。配置有效时返回 Store，厂商客户端类型留在未导出的适配器里。
 func NewS3(cfg S3Config) (Store, error) {
-	return nil, ErrNotImplemented
+	if err := validateS3Config(cfg); err != nil {
+		return nil, err
+	}
+	return newS3Store(cfg)
+}
+
+func validateS3Config(cfg S3Config) error {
+	var missing []string
+	if strings.TrimSpace(cfg.Endpoint) == "" {
+		missing = append(missing, "endpoint")
+	}
+	if strings.TrimSpace(cfg.Region) == "" {
+		missing = append(missing, "region")
+	}
+	if strings.TrimSpace(cfg.Bucket) == "" {
+		missing = append(missing, "bucket")
+	}
+	if cfg.AccessKey == "" {
+		missing = append(missing, "access key")
+	}
+	if cfg.SecretKey == "" {
+		missing = append(missing, "secret key")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("storage: s3 config missing %s", strings.Join(missing, ", "))
+	}
+	u, err := url.Parse(cfg.Endpoint)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
+		return errors.New("storage: s3 endpoint is invalid")
+	}
+	return nil
 }
