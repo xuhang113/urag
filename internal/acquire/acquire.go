@@ -1,6 +1,7 @@
 // Package acquire 定义把外部来源收成原始对象的契约。
 // 本地目录和 HTTP 地址会列出条目，并把正文流式交给存储。
-// 本包不清洗、不切分、不嵌入。数据库、站点地图和厂商接口尚未接通。
+// 公开收录只列出不登录就能下载的文档，不把正文写入对象存储。
+// 本包不清洗、不切分、不嵌入。数据库和厂商接口尚未接通。
 package acquire
 
 import (
@@ -22,7 +23,8 @@ const (
 	KindHTTP = "http"
 	// KindDatabase 是数据库来源，尚未接通。
 	KindDatabase = "database"
-	// KindSitemap 是站点地图来源，尚未接通。
+	// KindSitemap 是站点地图来源。
+	// List 解析 urlset 和 sitemapindex，只列出允许的文档 URL。
 	KindSitemap = "sitemap"
 	// KindVendorAPI 是厂商接口来源，尚未接通。
 	KindVendorAPI = "vendor_api"
@@ -67,12 +69,6 @@ type Result struct {
 // NewDatabase 尚未接通，不是可用实现。
 // 调用返回 ErrNotImplemented，不解析 dsn，也不连接数据库。
 func NewDatabase(dsn string) (Source, error) {
-	return nil, ErrNotImplemented
-}
-
-// NewSitemap 尚未接通，不是可用实现。
-// 调用返回 ErrNotImplemented，不抓取 rawURL。
-func NewSitemap(rawURL string) (Source, error) {
 	return nil, ErrNotImplemented
 }
 
