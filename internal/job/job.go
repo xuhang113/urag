@@ -132,6 +132,8 @@ type Limits struct {
 // Storage 只取 local 或 s3。FixturePath 是召回夹具路径。
 // Inline 为 true 时，清洗和建索引在入队方法返回前完成，成功状态为 succeeded。
 // UploadConcurrency 小于等于 0 时不限制同时运行的任务数。
+// CrawlCheckpoint 非空时，收录把已完成的 source URI 写进这个文件。
+// 下次执行先读文件，跳过已经处理完的来源。空字符串只把断点留在任务内存里。
 type Config struct {
 	Addr              string
 	DataDir           string
@@ -143,6 +145,7 @@ type Config struct {
 	FixturePath       string
 	Inline            bool
 	UploadConcurrency int
+	CrawlCheckpoint   string
 }
 
 // VectorWriter 按批把子块向量写入磁盘索引。

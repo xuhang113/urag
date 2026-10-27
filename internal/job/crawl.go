@@ -1,11 +1,14 @@
 package job
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/xuhang113/urag/internal/acquire"
@@ -57,6 +60,9 @@ func (p *Pipeline) executeCrawl(ctx context.Context, rec *jobRecord) error {
 		return errors.New("job: crawl input missing")
 	}
 	in := rec.crawl
+	if err := p.restoreCrawlCheckpoint(rec); err != nil {
+		return err
+	}
 	// 每次尝试使用新的去重器。上一轮失败留下的哈希不会把同一篇标成重复。
 	cleaner := clean.New(clean.NewMemoryDeduper())
 	crawler := acquire.NewCrawler(in.Client, in.Limits).WithDone(p.sourceURIs(rec))
@@ -298,5 +304,100 @@ func (p *Pipeline) markSource(rec *jobRecord, uri string) error {
 		return err
 	}
 	rec.Job.Checkpoint = raw
+	return p.writeCrawlCheckpoint(raw)
+}
+
+// restoreCrawlCheckpoint 把磁盘上的已完成来源并进本次任务。
+// 没有配置路径，或文件还不存在时，保持内存里的断点。
+func (p *Pipeline) restoreCrawlCheckpoint(rec *jobRecord) error {
+	path := p.cfg.CrawlCheckpoint
+	if path == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("job: read crawl checkpoint: %w", err)
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil
+	}
+	var disk objectCheckpoint
+	if err := json.Unmarshal(raw, &disk); err != nil {
+		return fmt.Errorf("job: read crawl checkpoint: %w", err)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var mem objectCheckpoint
+	if len(rec.Job.Checkpoint) > 0 {
+		if err := json.Unmarshal(rec.Job.Checkpoint, &mem); err != nil {
+			return err
+		}
+	}
+	mem.ObjectKeys = unionStrings(mem.ObjectKeys, disk.ObjectKeys)
+	mem.SourceURIs = unionStrings(mem.SourceURIs, disk.SourceURIs)
+	merged, err := json.Marshal(mem)
+	if err != nil {
+		return err
+	}
+	rec.Job.Checkpoint = merged
 	return nil
+}
+
+func (p *Pipeline) writeCrawlCheckpoint(raw []byte) error {
+	path := p.cfg.CrawlCheckpoint
+	if path == "" {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("job: write crawl checkpoint: %w", err)
+	}
+	f, err := os.CreateTemp(dir, ".crawl-checkpoint-*")
+	if err != nil {
+		return fmt.Errorf("job: write crawl checkpoint: %w", err)
+	}
+	tmp := f.Name()
+	done := false
+	defer func() {
+		if !done {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err := f.Write(append(append([]byte{}, raw...), '\n')); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("job: write crawl checkpoint: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("job: write crawl checkpoint: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("job: write crawl checkpoint: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("job: write crawl checkpoint: %w", err)
+	}
+	done = true
+	return nil
+}
+
+func unionStrings(lists ...[]string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, list := range lists {
+		for _, item := range list {
+			if item == "" {
+				continue
+			}
+			if _, ok := seen[item]; ok {
+				continue
+			}
+			seen[item] = struct{}{}
+			out = append(out, item)
+		}
+	}
+	return out
 }

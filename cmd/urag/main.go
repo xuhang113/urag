@@ -84,6 +84,7 @@ func crawl(args []string) error {
 		return err
 	}
 	cfg.Inline = true
+	cfg.CrawlCheckpoint = filepath.Join(cfg.DataDir, "crawl-checkpoint.json")
 	db, err := catalog.NewMySQL(dsn)
 	if err != nil {
 		return err

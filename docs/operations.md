@@ -60,7 +60,7 @@ go test ./internal/job/
 go run ./cmd/urag crawl seeds.txt
 ```
 
-命令要求 `URAG_MYSQL_DSN`。权重目录是 `URAG_EMBED_MODEL_DIR`，目录必须已经存在。同一主机相邻请求间隔 1 秒。向量写在 `URAG_DATA_DIR/vectors`。原文只留下来源 URL，不写入对象存储。成功时打印该集合的篇数，篇数来自 `catalog.CountIndexed`。
+命令要求 `URAG_MYSQL_DSN`。权重目录是 `URAG_EMBED_MODEL_DIR`，目录必须已经存在。同一主机相邻请求间隔 1 秒。向量写在 `URAG_DATA_DIR/vectors`。原文只留下来源 URL，不写入对象存储。已完成的 source URI 写在 `URAG_DATA_DIR/crawl-checkpoint.json`。进程中断后再次执行同一命令，会跳过这些地址。成功时打印该集合的篇数，篇数来自 `catalog.CountIndexed`。
 
 ## 本地前向
 

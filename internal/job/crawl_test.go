@@ -182,6 +182,86 @@ func TestCrawlRequiresLedgerAndVectors(t *testing.T) {
 	}
 }
 
+func TestCrawlCheckpointFileSkipsCompletedSources(t *testing.T) {
+	var mu sync.Mutex
+	hits := map[string]int{}
+	count := func(path string) {
+		mu.Lock()
+		hits[path]++
+		mu.Unlock()
+	}
+	mux := http.NewServeMux()
+	page := func(body string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			count(r.URL.Path)
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte(body))
+		}
+	}
+	mux.HandleFunc("/a.html", page(`<!doctype html><html><body><h1>Lantern</h1><p>The crimson lantern hangs on the east stone bridge.</p></body></html>`))
+	mux.HandleFunc("/b.html", page(`<!doctype html><html><body><h1>Gate</h1><p>The west granite gate stays shut.</p></body></html>`))
+	var srv *httptest.Server
+	mux.HandleFunc("/sitemap.xml", func(w http.ResponseWriter, r *http.Request) {
+		count(r.URL.Path)
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>` + srv.URL + `/a.html</loc></url><url><loc>` + srv.URL + `/b.html</loc></url></urlset>`))
+	})
+	srv = httptest.NewServer(mux)
+	defer srv.Close()
+
+	ck := filepath.Join(t.TempDir(), "crawl-checkpoint.json")
+	first := newCrawlRig(t, embed.NewFixture(64), true, 16)
+	first.p.cfg.CrawlCheckpoint = ck
+	got, err := first.p.SubmitCrawl(context.Background(), CrawlInput{
+		CollectionID: "alpha",
+		Seeds:        []string{srv.URL + "/sitemap.xml"},
+		Client:       srv.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != StateSucceeded {
+		t.Fatalf("state %s error %s", got.State, got.Error)
+	}
+	raw, err := os.ReadFile(ck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, frag := range []string{"source_uris", srv.URL + "/a.html", srv.URL + "/b.html"} {
+		if !strings.Contains(string(raw), frag) {
+			t.Fatalf("checkpoint %s missing %s", raw, frag)
+		}
+	}
+	mu.Lock()
+	seenA, seenB := hits["/a.html"], hits["/b.html"]
+	mu.Unlock()
+	if seenA == 0 || seenB == 0 {
+		t.Fatalf("first fetch a=%d b=%d", seenA, seenB)
+	}
+
+	second := newCrawlRig(t, embed.NewFixture(64), true, 16)
+	second.p.cfg.CrawlCheckpoint = ck
+	again, err := second.p.SubmitCrawl(context.Background(), CrawlInput{
+		CollectionID: "alpha",
+		Seeds:        []string{srv.URL + "/sitemap.xml"},
+		Client:       srv.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.State != StateSucceeded {
+		t.Fatalf("second state %s error %s", again.State, again.Error)
+	}
+	if len(second.emb.batches) != 0 {
+		t.Fatalf("completed sources were embedded again: %d", len(second.emb.batches))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if hits["/a.html"] != seenA || hits["/b.html"] != seenB {
+		t.Fatalf("refetch a %d->%d b %d->%d", seenA, hits["/a.html"], seenB, hits["/b.html"])
+	}
+}
+
 func TestCrawlFileDoesNotBufferOriginal(t *testing.T) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
