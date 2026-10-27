@@ -4,6 +4,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -51,6 +52,7 @@ type server struct {
 //	GET /api/collections/{id}/documents 返回该集合的文档。
 //	POST /api/retrieve 的 JSON 正文是 retrieve.Request，响应是 []retrieve.Hit。
 //	POST /api/try 只接受 JSON 字段 query，只检索集合 public。
+//	嵌入或重排在 trySearchTimeout 内没有返回时，结束这次请求。
 //	POST /api/eval 与 GET /api/eval/report 同时返回正常和对照报告。
 func Handler(p *job.Pipeline) http.Handler {
 	s := &server{p: p}
@@ -139,6 +141,13 @@ func (s *server) apiDocuments(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, docs)
 }
 
+// trySearchTimeout 是一次试查最多等待的时间。
+// 嵌入或重排子进程到点还没返回，就结束这次请求，不再停在检索中。
+var trySearchTimeout = 3 * time.Minute
+
+// tryTimeoutText 是试查超时后页面和接口展示的失败说明。
+const tryTimeoutText = "检索超时。收录正在占用嵌入模型，这次没有结果。"
+
 func (s *server) apiTry(w http.ResponseWriter, r *http.Request) {
 	if err := s.requirePipeline(); err != nil {
 		writeError(w, err)
@@ -156,15 +165,48 @@ func (s *server) apiTry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "web: query required", http.StatusBadRequest)
 		return
 	}
-	hits, err := s.p.Try(r.Context(), in.Query)
-	if err != nil {
-		writeError(w, err)
-		return
+	ctx, cancel := context.WithTimeout(r.Context(), trySearchTimeout)
+	defer cancel()
+	type tryOutcome struct {
+		hits []retrieve.Hit
+		err  error
 	}
-	if hits == nil {
-		hits = []retrieve.Hit{}
+	done := make(chan tryOutcome, 1)
+	go func() {
+		hits, err := s.p.Try(ctx, in.Query)
+		done <- tryOutcome{hits: hits, err: err}
+	}()
+	select {
+	case got := <-done:
+		if got.err != nil {
+			if tryTimedOut(ctx, got.err) {
+				writeTryTimeout(w)
+				return
+			}
+			writeError(w, got.err)
+			return
+		}
+		hits := got.hits
+		if hits == nil {
+			hits = []retrieve.Hit{}
+		}
+		writeJSON(w, http.StatusOK, hits)
+	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			writeTryTimeout(w)
+		}
 	}
-	writeJSON(w, http.StatusOK, hits)
+}
+
+func tryTimedOut(ctx context.Context, err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	return errors.Is(ctx.Err(), context.DeadlineExceeded)
+}
+
+func writeTryTimeout(w http.ResponseWriter) {
+	http.Error(w, tryTimeoutText, http.StatusGatewayTimeout)
 }
 
 func (s *server) apiRetrieve(w http.ResponseWriter, r *http.Request) {

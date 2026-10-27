@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 const maxForwardBytes = 64 << 20
@@ -77,7 +78,12 @@ func PythonCommand(scriptName, body string) ([]string, error) {
 }
 
 func execForward(ctx context.Context, argv []string, stdin []byte) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	// 上下文结束后，子进程或它留下的管道最多少等这段时间。
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Stdin = bytes.NewReader(stdin)
 	cmd.Env = forwardEnv()
 	var stderr tailBuf
@@ -90,22 +96,42 @@ func execForward(ctx context.Context, argv []string, stdin []byte) ([]byte, erro
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("embed: qwen forward: %w", err)
 	}
-	out, readErr := readLimited(stdout, maxForwardBytes)
-	if readErr != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
-		_, _ = io.Copy(io.Discard, stdout)
+	type readResult struct {
+		out []byte
+		err error
 	}
-	waitErr := cmd.Wait()
-	if readErr != nil {
-		return nil, readErr
-	}
-	if waitErr != nil {
+	done := make(chan readResult, 1)
+	go func() {
+		out, readErr := readLimited(stdout, maxForwardBytes)
+		done <- readResult{out: out, err: readErr}
+	}()
+	select {
+	case <-ctx.Done():
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		// 关掉读端，避免子进程退出后仍有人占着写端，读取一直不返回。
+		_ = stdout.Close()
+		<-done
+		_ = cmd.Wait()
+		return nil, ctx.Err()
+	case got := <-done:
+		if got.err != nil && cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_, _ = io.Copy(io.Discard, stdout)
+		}
+		waitErr := cmd.Wait()
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, forwardErr(waitErr, stderr.String())
+		if got.err != nil {
+			return nil, got.err
+		}
+		if waitErr != nil {
+			return nil, forwardErr(waitErr, stderr.String())
+		}
+		return got.out, nil
 	}
-	return out, nil
 }
 
 func readLimited(r io.Reader, limit int) ([]byte, error) {

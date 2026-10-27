@@ -422,6 +422,9 @@ func TestPageTry(t *testing.T) {
 	if !strings.Contains(body, "page-try") || !strings.Contains(body, "public") || !strings.Contains(body, "/api/try") {
 		t.Fatalf("try page: %s", body)
 	}
+	if !strings.Contains(body, "检索超时。收录正在占用嵌入模型，这次没有结果。") || !strings.Contains(body, "180000") {
+		t.Fatalf("try page missing timeout: %s", body)
+	}
 	if !strings.Contains(body, "没有足够相关的片段") {
 		t.Fatalf("try page missing empty copy: %s", body)
 	}

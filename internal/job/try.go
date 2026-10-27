@@ -15,6 +15,7 @@ const publicCollection model.CollectionID = "public"
 // Try 只在集合 public 里做磁盘向量检索和该集合的 BM25。
 // 合并后留下前 50 条子块，重排后最多 8 条，再丢掉没有高于 RerankMinScore 的命中。
 // 可以返回 0 条。嵌入器若能 Close，会在查询向量返回前关掉，然后再调用重排。
+// ctx 取消或到点时，嵌入、重排和父块查询一起停。
 // 其它集合不会被打开。query 空白时返回错误。
 // 夹具评价不走这里。
 func (p *Pipeline) Try(ctx context.Context, query string) ([]retrieve.Hit, error) {

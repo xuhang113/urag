@@ -375,10 +375,16 @@ const tryHTML = `{{define "try"}}
     err.textContent = "";
     result.textContent = "";
     status.textContent = "正在检索。先加载嵌入模型，退出后再加载重排模型。";
+    var timeoutText = "检索超时。收录正在占用嵌入模型，这次没有结果。";
+    var controller = new AbortController();
+    var timer = window.setTimeout(function () {
+      controller.abort();
+    }, 180000);
     fetch("/api/try", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({query: query})
+      body: JSON.stringify({query: query}),
+      signal: controller.signal
     }).then(function (res) {
       return res.text().then(function (text) {
         if (!res.ok) {
@@ -417,7 +423,14 @@ const tryHTML = `{{define "try"}}
       result.appendChild(table);
     }).catch(function (e) {
       status.textContent = "";
-      err.textContent = e && e.message ? e.message : "检索失败";
+      if (e && e.name === "AbortError") {
+        err.textContent = timeoutText;
+        return;
+      }
+      var message = e && e.message ? String(e.message).trim() : "";
+      err.textContent = message || "检索失败";
+    }).finally(function () {
+      window.clearTimeout(timer);
     });
   });
 })();
