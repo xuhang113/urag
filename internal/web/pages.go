@@ -354,7 +354,7 @@ const askHTML = `{{define "ask"}}
 {{end}}`
 
 const tryHTML = `{{define "try"}}
-<p>只查集合 {{.Try.Collection}}。磁盘向量和这个集合的 BM25 合并后留下前 50 条，再重排，最多显示 8 条。嵌入模型退出后才加载重排模型。</p>
+<p>只查集合 {{.Try.Collection}}。磁盘向量和这个集合的 BM25 合并后留下前 50 条，再重排。分数高于门槛才显示，最多 8 条。嵌入模型退出后才加载重排模型。</p>
 <form id="try-form">
 <label for="query">问题</label>
 <input id="query" name="query" required>
@@ -387,10 +387,11 @@ const tryHTML = `{{define "try"}}
         return JSON.parse(text);
       });
     }).then(function (hits) {
-      status.textContent = "命中 " + hits.length + " 条";
-      if (!hits.length) {
+      if (!hits || !hits.length) {
+        status.textContent = "没有足够相关的片段";
         return;
       }
+      status.textContent = "命中 " + hits.length + " 条";
       var table = document.createElement("table");
       var head = document.createElement("tr");
       ["collection_id", "heading_path", "原文位置", "分数", "子块", "父块"].forEach(function (name) {

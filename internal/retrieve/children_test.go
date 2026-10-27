@@ -213,6 +213,46 @@ func TestRetrieveChildrenKeepsShortList(t *testing.T) {
 	}
 }
 
+func TestRetrieveChildrenKeepsScoresBelowDefaultMin(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	meta := embed.ModelMeta{Name: "fixture", Dim: 8}
+	emb := embed.NewFixture(meta.Dim)
+	reg, err := index.NewDisk(dir, meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk := reg.(*index.Disk)
+	shared := mustOne(t, emb, "shared fixture vector")
+	var recs []index.VectorRecord
+	for _, docID := range []int{1, 2} {
+		recs = append(recs, childRecord(docID, "alpha", fmt.Sprintf("crimson lantern item%d", docID), "H", shared))
+	}
+	if err := disk.UpsertRecords(ctx, recs); err != nil {
+		t.Fatal(err)
+	}
+	svc := retrieve.New(reg, emb, retrieve.Weights{}, nil)
+	const low = 0.01
+	if low >= retrieve.DefaultRerankMinScore {
+		t.Fatal("fixture score is not below the production threshold")
+	}
+	hits, err := svc.RetrieveChildren(ctx, retrieve.Request{
+		Collections: []model.CollectionID{"alpha"},
+		Query:       "crimson lantern",
+	}, constReranker{score: low}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("hits %d", len(hits))
+	}
+	for _, hit := range hits {
+		if hit.Score != low {
+			t.Fatalf("%+v", hit)
+		}
+	}
+}
+
 func TestReleaseOnEmbedClosesBeforeReturn(t *testing.T) {
 	var order []string
 	inner := &markEmbedder{mark: func() { order = append(order, "embed") }}
@@ -264,6 +304,21 @@ func (c *captureReranker) Score(ctx context.Context, query string, passages []st
 	out := make([]float64, len(passages))
 	for i := range out {
 		out[i] = float64(len(passages) - i)
+	}
+	return out, nil
+}
+
+type constReranker struct {
+	score float64
+}
+
+func (c constReranker) Score(ctx context.Context, query string, passages []string) ([]float64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]float64, len(passages))
+	for i := range out {
+		out[i] = c.score
 	}
 	return out, nil
 }

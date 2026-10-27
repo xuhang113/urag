@@ -58,6 +58,12 @@ const (
 	childCandidateK  = 200
 	childRecallLimit = 50
 	childKeepLimit   = 8
+
+	// DefaultRerankMinScore 是未设置 URAG_RERANK_MIN_SCORE 时的门槛。
+	// Qwen rerank 分数，低于此视为不相关。
+	// 这个分数是 yes 相对 no 的概率；0.5 表示模型并不判这段正文相关。
+	// 试查页和 urag search 用它丢掉低分命中。夹具评价不读它，仍按原排序算 Recall。
+	DefaultRerankMinScore = 0.5
 )
 
 // ParentLookup 按父块编号取出整节正文。
@@ -225,6 +231,19 @@ func (s service) searchOne(ctx context.Context, idx index.Index, q index.Query, 
 		add(h, 0, h.Score)
 	}
 	return out, nil
+}
+
+// KeepAboveRerankScore 只留下分数高于 min 的命中，并保持重排后的顺序。
+// 等于门槛的也丢掉。一条都不够时返回空切片，不用低分结果补满。
+// 不修改调用方传入的切片。
+func KeepAboveRerankScore(hits []Hit, min float64) []Hit {
+	kept := make([]Hit, 0, len(hits))
+	for _, hit := range hits {
+		if hit.Score > min {
+			kept = append(kept, hit)
+		}
+	}
+	return kept
 }
 
 func sortHits(hits []Hit) {

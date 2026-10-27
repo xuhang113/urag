@@ -150,6 +150,10 @@ type Config struct {
 	Inline            bool
 	UploadConcurrency int
 	CrawlCheckpoint   string
+	// RerankMinScore 是试查页和 urag search 的重排分数门槛。
+	// 命中必须高于它才返回。生产进程从 URAG_RERANK_MIN_SCORE 读入，未设置时用 retrieve.DefaultRerankMinScore。
+	// 夹具评价走 Ask，不读这个字段。
+	RerankMinScore float64
 }
 
 // VectorWriter 按批把子块向量写入磁盘索引。

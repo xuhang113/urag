@@ -33,6 +33,7 @@
 | `URAG_MYSQL_DSN` | `urag crawl` 的台账连接。没有它时收录命令退出 | 假 DSN，见 `.env.example` |
 | `URAG_EMBED_MODEL_DIR` | 本地嵌入权重目录。目录不存在时收录命令退出，不下载 | 已有目录 |
 | `URAG_COLLECTION` | 收录写入的集合 | `public` |
+| `URAG_RERANK_MIN_SCORE` | 试查页和 `urag search` 的重排分数门槛。Qwen rerank 分数，低于此视为不相关。命中必须高于它才返回，可以是 0 条。夹具评价不使用它 | `0.5` |
 
 `URAG_STORAGE=s3` 且端点、桶或密钥缺失时，进程退出并提示，不会伪造客户端。未设置 `URAG_EMBED_ENDPOINT` 时不会访问嵌入服务。`urag crawl` 在缺少 `URAG_MYSQL_DSN` 或 `URAG_EMBED_MODEL_DIR` 时退出，不会下载权重。
 
@@ -81,7 +82,7 @@ go run ./cmd/urag search 问题
 
 `index` 只读取台账里该集合的子块。嵌入文本是 `chunk.Passage`，文档侧不加指令。向量、`chunk_id`、`parent_id`、`doc_id`、`version`、`collection_id`、`heading_path`、`page` 和子块正文写入这一个 Milvus collection。不写 PDF 或 DOCX 原文，不把 BM25 写进 Milvus，也不打开别的集合。建索引只加载嵌入模型，不加载重排模型，不读种子，不改断点。
 
-`search` 只打开 `URAG_COLLECTION`。向量 top 200 和该集合关键词索引上的 BM25 top 200 合并后，只把前 50 个子块送给 `Qwen/Qwen3-Reranker-4B`。重排只出分数。留下最多 8 条，再按 `parent_id` 从台账取父块整节。查询使用 `embed.QueryText`。嵌入进程关掉之后才启动重排进程。关键词索引由台账里的子块正文在内存里重建，不另起搜索引擎。
+`search` 只打开 `URAG_COLLECTION`。向量 top 200 和该集合关键词索引上的 BM25 top 200 合并后，只把前 50 个子块送给 `Qwen/Qwen3-Reranker-4B`。重排只出分数。分数必须高于 `URAG_RERANK_MIN_SCORE` 才留下，最多 8 条，可以一条都没有；再按 `parent_id` 从台账取父块整节。查询使用 `embed.QueryText`。嵌入进程关掉之后才启动重排进程。关键词索引由台账里的子块正文在内存里重建，不另起搜索引擎。夹具评价仍按原排序算 Recall，不套这道门槛。
 
 ## 验收页
 
@@ -121,6 +122,6 @@ go run ./cmd/urag try
 
 `URAG_DATA_DIR/vectors` 里要已有该集合的 `records.bin`。嵌入权重是 `URAG_EMBED_MODEL_DIR`。重排权重优先用 `URAG_RERANK_MODEL_DIR`，否则找嵌入目录旁边的 `Qwen3-Reranker-4B`。目录不存在就退出，不下载。
 
-页面监听 `127.0.0.1:8080`。这个端口已被占用时改用 `127.0.0.1:8088`。浏览器打开 `/try`。`POST /api/try` 的 JSON 只有 `query`。向量和该集合 BM25 合并后留下前 50 条，重排后最多返回 8 条。响应里的 `chunk` 是子块，`parent` 是父块正文；父块查不到时没有 `parent`。原文位置是 `start_byte` 和 `end_byte`。
+页面监听 `127.0.0.1:8080`。这个端口已被占用时改用 `127.0.0.1:8088`。浏览器打开 `/try`。`POST /api/try` 的 JSON 只有 `query`。向量和该集合 BM25 合并后留下前 50 条，重排后只返回分数高于 `URAG_RERANK_MIN_SCORE` 的命中，最多 8 条。没有达到门槛时页面写「没有足够相关的片段」，不用低分结果填满 8 行。响应里的 `chunk` 是子块，`parent` 是父块正文；父块查不到时没有 `parent`。原文位置是 `start_byte` 和 `end_byte`。
 
 一次提问先加载嵌入模型，算出查询向量后退出，再加载重排模型。两个权重不会同时留在内存里。已设置 `URAG_MYSQL_DSN` 时用它读取父块，错误文本不带连接串。没有这个变量时只显示子块。原有 `/ask` 仍在。

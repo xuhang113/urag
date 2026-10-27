@@ -422,6 +422,9 @@ func TestPageTry(t *testing.T) {
 	if !strings.Contains(body, "page-try") || !strings.Contains(body, "public") || !strings.Contains(body, "/api/try") {
 		t.Fatalf("try page: %s", body)
 	}
+	if !strings.Contains(body, "没有足够相关的片段") {
+		t.Fatalf("try page missing empty copy: %s", body)
+	}
 	ask := get(t, h, "/ask")
 	if ask.Code != http.StatusOK || !strings.Contains(ask.Body.String(), "page-ask") || !strings.Contains(ask.Body.String(), "提问") {
 		t.Fatalf("ask page missing: %d %s", ask.Code, ask.Body.String())
@@ -462,6 +465,79 @@ func TestPageTry(t *testing.T) {
 	if len(opened.ids) != 1 || opened.ids[0] != "public" {
 		t.Fatalf("opened %v", opened.ids)
 	}
+}
+
+func TestPageTryDropsLowRerankScore(t *testing.T) {
+	low := postPublicTry(t, retrieve.DefaultRerankMinScore, retrieve.DefaultRerankMinScore)
+	if len(low) != 0 {
+		t.Fatalf("score at the threshold was returned: %+v", low)
+	}
+	below := postPublicTry(t, 0.2, retrieve.DefaultRerankMinScore)
+	if len(below) != 0 {
+		t.Fatalf("low score was returned: %+v", below)
+	}
+	high := postPublicTry(t, retrieve.DefaultRerankMinScore+0.1, retrieve.DefaultRerankMinScore)
+	if len(high) != 1 || high[0].ChunkID != "c1" || high[0].CollectionID != "public" {
+		t.Fatalf("%+v", high)
+	}
+	if high[0].Score != retrieve.DefaultRerankMinScore+0.1 {
+		t.Fatalf("score %+v", high[0])
+	}
+}
+
+func postPublicTry(t *testing.T, score, min float64) []retrieve.Hit {
+	t.Helper()
+	ctx := context.Background()
+	meta := embed.ModelMeta{Name: "fixture", Dim: 8}
+	emb := embed.NewFixture(meta.Dim)
+	reg, err := index.NewDisk(t.TempDir(), meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk := reg.(*index.Disk)
+	qvec := mustEmbed(t, emb, embed.QueryText("crimson lantern"))
+	if err := disk.UpsertRecords(ctx, []index.VectorRecord{{
+		ChunkID: "c1", ParentID: 42, DocID: 7, CollectionID: "public",
+		HeadingPath: "东桥", Body: "crimson lantern east bridge",
+		Vector: qvec,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	closer := &closeEmbedder{inner: emb}
+	store, err := storage.NewLocal(t.TempDir(), storage.RetryPolicy{MaxAttempts: 3}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := job.New(job.Config{
+		Inline:         true,
+		DataDir:        t.TempDir(),
+		Weights:        retrieve.Weights{Vector: 0.7, Keyword: 0.3},
+		Chunk:          chunk.Options{MaxLen: 800, Overlap: 100},
+		RerankMinScore: min,
+	}, job.Deps{
+		Store:    store,
+		Embedder: closer,
+		Registry: reg,
+		Reranker: retrieve.NewOverlapReranker(),
+		Splitter: chunk.NewParagraph(),
+		Cleaner:  clean.New(clean.NewMemoryDeduper()),
+		Passages: &closedReranker{emb: closer, score: score},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := postJSON(t, web.Handler(p), "/api/try", map[string]any{"query": "crimson lantern"})
+	if got.Code != http.StatusOK {
+		t.Fatalf("POST /api/try %d %s", got.Code, got.Body.String())
+	}
+	if strings.TrimSpace(got.Body.String()) == "null" {
+		t.Fatal("null hits")
+	}
+	var hits []retrieve.Hit
+	if err := json.Unmarshal(got.Body.Bytes(), &hits); err != nil {
+		t.Fatal(err)
+	}
+	return hits
 }
 
 func postJSON(t *testing.T, h http.Handler, target string, payload any) *httptest.ResponseRecorder {

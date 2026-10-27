@@ -13,6 +13,32 @@ import (
 	"github.com/xuhang113/urag/internal/retrieve"
 )
 
+func TestKeepAboveRerankScore(t *testing.T) {
+	hits := []retrieve.Hit{
+		{ChunkID: "a", Score: 0.9},
+		{ChunkID: "b", Score: retrieve.DefaultRerankMinScore},
+		{ChunkID: "c", Score: 0.2},
+		{ChunkID: "d", Score: 0.8},
+	}
+	got := retrieve.KeepAboveRerankScore(hits, retrieve.DefaultRerankMinScore)
+	if len(got) != 2 || got[0].ChunkID != "a" || got[1].ChunkID != "d" {
+		t.Fatalf("%+v", got)
+	}
+	if hits[1].ChunkID != "b" || len(hits) != 4 {
+		t.Fatal("input was mutated")
+	}
+	if retrieve.DefaultRerankMinScore <= 0 {
+		t.Fatal("default rerank min score must be positive")
+	}
+	none := retrieve.KeepAboveRerankScore([]retrieve.Hit{{ChunkID: "low", Score: 0.1}}, retrieve.DefaultRerankMinScore)
+	if none == nil || len(none) != 0 {
+		t.Fatalf("%#v", none)
+	}
+	if len(retrieve.KeepAboveRerankScore(nil, retrieve.DefaultRerankMinScore)) != 0 {
+		t.Fatal("nil input")
+	}
+}
+
 func TestRetrieveRequiresCollections(t *testing.T) {
 	svc := retrieve.New(index.NewMemory(), embed.NewFixture(8), retrieve.Weights{}, nil)
 	_, err := svc.Retrieve(context.Background(), retrieve.Request{Query: "crimson", TopK: 5})

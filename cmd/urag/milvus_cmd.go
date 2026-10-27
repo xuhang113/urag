@@ -96,6 +96,8 @@ func indexCollection(args []string) error {
 
 // searchCollection 在一个点名集合里做向量检索和 BM25，再重排前 50 个子块。
 // 嵌入进程关掉之后才加载重排模型。重排只出分数，不生成答案。
+// 分数必须高于 URAG_RERANK_MIN_SCORE 才写入输出，可以一条都没有。
+// 夹具评价不走这个命令。
 func searchCollection(args []string) error {
 	question := strings.TrimSpace(strings.Join(args, " "))
 	if question == "" {
@@ -191,6 +193,7 @@ func searchCollection(args []string) error {
 	if err != nil {
 		return err
 	}
+	hits = retrieve.KeepAboveRerankScore(hits, cfg.RerankMinScore)
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(hits)

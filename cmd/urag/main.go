@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -299,6 +300,14 @@ func configFromEnv() (job.Config, error) {
 	if err != nil {
 		return job.Config{}, err
 	}
+	// Qwen rerank 分数，低于此视为不相关。未设置时用正数默认门槛。
+	minScore, err := envFloat("URAG_RERANK_MIN_SCORE", retrieve.DefaultRerankMinScore)
+	if err != nil {
+		return job.Config{}, err
+	}
+	if math.IsNaN(minScore) || math.IsInf(minScore, 0) {
+		return job.Config{}, errors.New("urag: URAG_RERANK_MIN_SCORE 不是有限数")
+	}
 	return job.Config{
 		Addr:              envOr("URAG_ADDR", ":8080"),
 		DataDir:           envOr("URAG_DATA_DIR", "./data"),
@@ -314,6 +323,7 @@ func configFromEnv() (job.Config, error) {
 			EmbedBatch:       embedBatch,
 			EmbedConcurrency: embedN,
 		},
+		RerankMinScore: minScore,
 	}, nil
 }
 

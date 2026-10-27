@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/xuhang113/urag/internal/embed"
+	"github.com/xuhang113/urag/internal/retrieve"
 )
 
 func TestReadSeedsSkipsComments(t *testing.T) {
@@ -85,6 +86,50 @@ func TestEmbedBatchDefaultIs64(t *testing.T) {
 	}
 	if cfg.Limits.EmbedBatch != 32 {
 		t.Fatalf("batch %d", cfg.Limits.EmbedBatch)
+	}
+}
+
+func TestRerankMinScoreFromEnv(t *testing.T) {
+	t.Setenv("URAG_RERANK_MIN_SCORE", "")
+	cfg, err := configFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RerankMinScore != retrieve.DefaultRerankMinScore || cfg.RerankMinScore <= 0 {
+		t.Fatalf("default %v", cfg.RerankMinScore)
+	}
+	t.Setenv("URAG_RERANK_MIN_SCORE", "0.2")
+	cfg, err = configFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RerankMinScore != 0.2 {
+		t.Fatalf("%v", cfg.RerankMinScore)
+	}
+	t.Setenv("URAG_RERANK_MIN_SCORE", "nope")
+	if _, err := configFromEnv(); err == nil || !strings.Contains(err.Error(), "URAG_RERANK_MIN_SCORE") {
+		t.Fatal(err)
+	}
+	t.Setenv("URAG_RERANK_MIN_SCORE", "NaN")
+	if _, err := configFromEnv(); err == nil || !strings.Contains(err.Error(), "有限数") {
+		t.Fatal(err)
+	}
+}
+
+func TestSearchFiltersByRerankScore(t *testing.T) {
+	body, err := os.ReadFile("milvus_cmd.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	start := strings.Index(text, "func searchCollection")
+	end := strings.Index(text, "func rerankDir")
+	if start < 0 || end < start {
+		t.Fatal("searchCollection missing")
+	}
+	fn := text[start:end]
+	if !strings.Contains(fn, "KeepAboveRerankScore") || !strings.Contains(fn, "RerankMinScore") {
+		t.Fatal("search does not apply the rerank score gate")
 	}
 }
 
