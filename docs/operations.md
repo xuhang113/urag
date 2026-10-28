@@ -115,7 +115,7 @@ go run ./cmd/urag serve
 
 ## 试查
 
-`urag try` 只打开集合 `public`。向量检索读 `URAG_MILVUS_ADDR` 上的这个 Milvus collection，搜索参数 ef 大于本次 k。没有这个地址就退出，不猜地址，也不改读磁盘索引。不新建向量文件，也不启动收录。BM25 读 Elasticsearch 索引 `public`。没有 `URAG_ELASTIC_ADDR`，或 Elasticsearch 没连上时，页面日志写「BM25 未连接」，不用进程内 BM25 冒充已经查过 Elasticsearch。连上时启动日志写「BM25 Elasticsearch 索引 public」。重排仍用 `URAG_RERANK_MODEL_DIR`。`urag load-bm25` 把台账子块写入这个索引，不重新嵌入。
+`urag try` 只打开集合 `public`。向量检索读 `URAG_MILVUS_ADDR` 上的这个 Milvus collection，搜索参数 ef 大于本次 k。没有这个地址就退出，不猜地址，也不改读磁盘索引。不新建向量文件，也不启动收录。BM25 读 Elasticsearch 索引 `public`。没有 `URAG_ELASTIC_ADDR`，或 Elasticsearch 没连上时，页面日志写「BM25 未连接」，不用进程内 BM25 冒充已经查过 Elasticsearch。连上时启动日志写「BM25 Elasticsearch 索引 public」。重排仍用 `URAG_RERANK_MODEL_DIR`。`urag load-bm25` 把 Milvus 里已有子块的正文写入这个索引，不重新嵌入。
 
 ```bash
 go run ./cmd/urag try

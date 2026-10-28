@@ -422,8 +422,11 @@ func TestPageTry(t *testing.T) {
 	if !strings.Contains(body, "page-try") || !strings.Contains(body, "public") || !strings.Contains(body, "/api/try") {
 		t.Fatalf("try page: %s", body)
 	}
-	if !strings.Contains(body, "Milvus") || !strings.Contains(body, "BM25 未连接") {
-		t.Fatalf("try page still describes only the disk index: %s", body)
+	if !strings.Contains(body, "Milvus") || !strings.Contains(body, "Elasticsearch 索引 public") || !strings.Contains(body, "前 50 条") {
+		t.Fatalf("try page missing milvus and elasticsearch: %s", body)
+	}
+	if strings.Contains(body, "BM25 未连接") {
+		t.Fatalf("try page still says BM25 is disconnected: %s", body)
 	}
 	if !strings.Contains(body, "检索超时。收录正在占用嵌入模型，这次没有结果。") || !strings.Contains(body, "180000") {
 		t.Fatalf("try page missing timeout: %s", body)

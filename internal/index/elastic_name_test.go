@@ -9,6 +9,15 @@ import (
 	"github.com/xuhang113/urag/internal/model"
 )
 
+func TestElasticIndexUsesSmartCN(t *testing.T) {
+	if !strings.Contains(elasticIndexBody, "smartcn") || !strings.Contains(elasticIndexBody, `"type": "BM25"`) {
+		t.Fatal("chinese analyzer or BM25 missing")
+	}
+	if strings.Contains(elasticIndexBody, "ik_") {
+		t.Fatal("ik analyzer")
+	}
+}
+
 func TestCollectionPublicUsesIndexPublic(t *testing.T) {
 	name, err := elasticIndexName("public")
 	if err != nil || name != "public" {

@@ -206,6 +206,115 @@ func (s *sdkSession) ChunkVersions(ctx context.Context, name string) (map[string
 	}
 }
 
+// milvusBodyFields 是从 Milvus 抄正文时读出的列。没有向量列。
+func milvusBodyFields() []string {
+	return []string{
+		fieldChunkID,
+		fieldParentID,
+		fieldDocID,
+		fieldVersion,
+		fieldCollectionID,
+		fieldHeading,
+		fieldPage,
+		fieldBody,
+	}
+}
+
+// ForEachChunk 按主键分页读出子块正文。输出字段里没有向量。
+func (s *sdkSession) ForEachChunk(ctx context.Context, name string, fn func(milvusRow) error) error {
+	if err := s.cli.LoadCollection(ctx, name, false); err != nil {
+		return err
+	}
+	opt := client.NewQueryIteratorOption(name).
+		WithExpr(fieldChunkID + ` != ""`).
+		WithOutputFields(milvusBodyFields()...).
+		WithBatchSize(256)
+	itr, err := s.cli.QueryIterator(ctx, opt)
+	if err != nil {
+		return err
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		rs, err := itr.Next(ctx)
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		cols := make(map[string]entity.Column, len(milvusBodyFields()))
+		n := 0
+		for _, field := range milvusBodyFields() {
+			col := rs.GetColumn(field)
+			if col == nil {
+				return fmt.Errorf("index: milvus collection %s missing %s", name, field)
+			}
+			if n == 0 {
+				n = col.Len()
+			} else if col.Len() != n {
+				return fmt.Errorf("index: milvus collection %s column %s", name, field)
+			}
+			cols[field] = col
+		}
+		for i := 0; i < n; i++ {
+			row, err := rowFromColumns(cols, i)
+			if err != nil {
+				return err
+			}
+			if err := fn(row); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func rowFromColumns(cols map[string]entity.Column, i int) (milvusRow, error) {
+	chunkID, err := cols[fieldChunkID].GetAsString(i)
+	if err != nil {
+		return milvusRow{}, err
+	}
+	parentID, err := cols[fieldParentID].GetAsInt64(i)
+	if err != nil {
+		return milvusRow{}, err
+	}
+	docID, err := cols[fieldDocID].GetAsInt64(i)
+	if err != nil {
+		return milvusRow{}, err
+	}
+	version, err := cols[fieldVersion].GetAsInt64(i)
+	if err != nil {
+		return milvusRow{}, err
+	}
+	collectionID, err := cols[fieldCollectionID].GetAsString(i)
+	if err != nil {
+		return milvusRow{}, err
+	}
+	heading, err := cols[fieldHeading].GetAsString(i)
+	if err != nil {
+		return milvusRow{}, err
+	}
+	page, err := cols[fieldPage].GetAsInt64(i)
+	if err != nil {
+		return milvusRow{}, err
+	}
+	body, err := cols[fieldBody].GetAsString(i)
+	if err != nil {
+		return milvusRow{}, err
+	}
+	return milvusRow{
+		ChunkID:      chunkID,
+		ParentID:     parentID,
+		DocID:        docID,
+		Version:      version,
+		CollectionID: collectionID,
+		HeadingPath:  heading,
+		Page:         page,
+		Body:         body,
+	}, nil
+}
+
 // hnswSearchEF 是 HNSW 搜索的 ef。Milvus 要求 ef 大于本次的 k。
 // 向量候选 topK 为 200 时，ef 取 256。k 不小于 256 时，ef 取 k+1。
 func hnswSearchEF(topK int) int {

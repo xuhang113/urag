@@ -301,13 +301,13 @@ func TestLoadBM25DoesNotEmbed(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(body)
-	for _, frag := range []string{"NewQwen", "Embed(", "from_pretrained", "URAG_EMBED_MODEL_DIR"} {
+	for _, frag := range []string{"NewQwen", "Embed(", "from_pretrained", "URAG_EMBED_MODEL_DIR", "ListCollectionChildren", "NewS3", "NewLocal"} {
 		if strings.Contains(text, frag) {
-			t.Fatalf("load-bm25 embeds via %s", frag)
+			t.Fatalf("load-bm25 embeds or stores originals via %s", frag)
 		}
 	}
-	if !strings.Contains(text, "ListCollectionChildren") || !strings.Contains(text, "UpsertRecords") {
-		t.Fatal("load-bm25 does not copy child chunks")
+	if !strings.Contains(text, "CopyBodies") || !strings.Contains(text, "NewMilvusWriter") {
+		t.Fatal("load-bm25 does not copy Milvus bodies")
 	}
 }
 
