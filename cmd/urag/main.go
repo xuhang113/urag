@@ -70,6 +70,8 @@ func run(args []string) error {
 		return tryPage(args[1:])
 	case "sync-disk":
 		return syncDisk(args[1:])
+	case "load-bm25":
+		return loadBM25(args[1:])
 	default:
 		return fmt.Errorf("urag: unknown command %q", cmd)
 	}

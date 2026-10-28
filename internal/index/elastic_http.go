@@ -15,7 +15,7 @@ import (
 
 // elasticIndexBody 是一个集合的索引设置。
 // 中文用 Elasticsearch 的 smartcn 分析器。本机没有 IK 插件，索引用 smartcn，不用 IK。
-// smartcn 由 analysis-smartcn 提供。这一轮不安装、不启动 Elasticsearch。
+// smartcn 由 analysis-smartcn 提供。创建索引前，本机 Elasticsearch 要已经装上这个插件。
 // body 和 heading_path 的 similarity 是 BM25。命中分数用 Elasticsearch 返回的 _score，不在进程内重算。
 const elasticIndexBody = `{
   "settings": {

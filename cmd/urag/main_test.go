@@ -284,11 +284,30 @@ func TestTryCommandDoesNotWriteDSN(t *testing.T) {
 	if !strings.Contains(text, "URAG_RERANK_MODEL_DIR") || !strings.Contains(text, "NewCrossEncoderReranker") {
 		t.Fatal("try command missing configurable rerank directory")
 	}
-	if strings.Contains(text, "KeepEmbed") || strings.Contains(text, "starter.Start") || strings.Contains(text, "ParkEmbed") {
-		t.Fatal("try still keeps the embedder resident and skips rerank")
+	if !strings.Contains(text, "KeepEmbed") || !strings.Contains(text, "starter.Start") || !strings.Contains(text, "ReleaseHold") {
+		t.Fatal("try does not keep one embed process")
+	}
+	if strings.Contains(text, "ParkEmbed") {
+		t.Fatal("try parks the embedder and skips rerank")
 	}
 	if !strings.Contains(text, "Passages:") {
 		t.Fatal("try does not pass the reranker into the pipeline")
+	}
+}
+
+func TestLoadBM25DoesNotEmbed(t *testing.T) {
+	body, err := os.ReadFile("elastic_cmd.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, frag := range []string{"NewQwen", "Embed(", "from_pretrained", "URAG_EMBED_MODEL_DIR"} {
+		if strings.Contains(text, frag) {
+			t.Fatalf("load-bm25 embeds via %s", frag)
+		}
+	}
+	if !strings.Contains(text, "ListCollectionChildren") || !strings.Contains(text, "UpsertRecords") {
+		t.Fatal("load-bm25 does not copy child chunks")
 	}
 }
 

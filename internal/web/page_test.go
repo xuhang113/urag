@@ -443,8 +443,8 @@ func TestPageTry(t *testing.T) {
 	if !strings.Contains(body, "step.started") || !strings.Contains(body, "step.ended") || !strings.Contains(body, "step.seconds") {
 		t.Fatalf("try page does not render step times: %s", body)
 	}
-	if !strings.Contains(body, "算完查询向量后卸下嵌入") || !strings.Contains(body, "再加载重排模型") || !strings.Contains(body, "嵌入设备") {
-		t.Fatalf("try page missing sequential rerank: %s", body)
+	if !strings.Contains(body, "嵌入模型已在内存") || !strings.Contains(body, "用完就退出") || !strings.Contains(body, "嵌入设备") {
+		t.Fatalf("try page missing resident embed: %s", body)
 	}
 	if !strings.Contains(body, "URAG_RERANK_MODEL_DIR") || !strings.Contains(body, "Qwen3-Reranker-4B") || !strings.Contains(body, "重排模型名") {
 		t.Fatalf("try page missing rerank model config: %s", body)

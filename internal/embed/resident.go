@@ -38,9 +38,9 @@ type ForwardSession interface {
 	Holding() bool
 }
 
-// Start 启动嵌入进程并占住模型闸，直到 Close。
+// Start 启动嵌入进程并占住模型闸，直到 ReleaseHold 或 Close。
 // 这期间 Embed 把批次写到该进程的 stdin，从 stdout 读 2560 维向量。
-// 进程一直留到 Close。不在这里加载重排模型。
+// 进程一直留到 Close。权重在第一次前向时加载，之后不再 from_pretrained。
 // 重复 Start 在进程还活着时直接返回。Close 之后不能再 Start。
 func (q *qwenEmbedder) Start(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
@@ -114,6 +114,23 @@ func (q *qwenEmbedder) Close() error {
 		releaseLocal()
 	}
 	return nil
+}
+
+// ReleaseHold 放开模型闸，已经启动的嵌入进程和权重都留着。
+// 试查用它让 bge 重排在这次提问里启动，用完自己退出。
+// 下一次 Embed 仍走这个进程，不再重新加载嵌入模型。
+// 没有占着闸时什么也不做。Close 之后调用也没有效果。
+func (q *qwenEmbedder) ReleaseHold() {
+	if q == nil {
+		return
+	}
+	q.mu.Lock()
+	held := q.held
+	q.held = false
+	q.mu.Unlock()
+	if held {
+		releaseLocal()
+	}
 }
 
 func startResident(ctx context.Context, argv []string) (*residentProc, error) {

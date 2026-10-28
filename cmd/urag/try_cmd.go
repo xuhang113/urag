@@ -27,10 +27,10 @@ import (
 
 // tryPage 在本机打开试查页。
 // 向量检索只读 Milvus 里的集合 public。不读磁盘索引，不新建向量文件，也不把连接串写进输出。
-// Elasticsearch 没连上时，提问日志写「BM25 未连接」，不用进程内 BM25 冒充。
-// 每次提问加载嵌入，查询向量返回后嵌入进程退出，再加载重排，重排结束后重排进程退出。
-// 两个模型不同时留在内存里。下一次提问再加载嵌入。
-// 重排目录来自 URAG_RERANK_MODEL_DIR。未设置时用嵌入目录旁边的 Qwen3-Reranker-4B。
+// Elasticsearch 连上时，BM25 查索引 public。没连上时，提问日志写「BM25 未连接」，不用进程内 BM25 冒充。
+// 嵌入进程在试查进程里只启动一次。第二次提问日志写「嵌入模型已在内存」。
+// 启动后放开模型闸，重排仍用 URAG_RERANK_MODEL_DIR 里的模型，用完退出。
+// 未设置重排目录时用嵌入目录旁边的 Qwen3-Reranker-4B。
 // 目录是 cross-encoder 时用小模型打分，否则仍用 Qwen 重排。不下载权重。
 func tryPage(args []string) error {
 	if len(args) != 0 {
@@ -59,11 +59,12 @@ func tryPage(args []string) error {
 	if err != nil {
 		return err
 	}
+	// 嵌入进程留到试查进程结束。闸在 Start 之后放开，重排仍能启动。
+	cfg.KeepEmbed = true
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	// 不常驻嵌入。常驻会占着模型闸，重排无法启动。
-	// 每次 Embed 单独起一个进程，返回前进程退出，然后再 Score。
 	// 向量只走 Milvus。没有地址时 milvusAddr 已经退出，这里不再猜地址，也不打开磁盘索引。
+	// ef 大于本次 k，这个约束在 Milvus 搜索参数里。
 	writer, err := index.NewMilvusWriter(addr, qwenMeta)
 	if err != nil {
 		return err
@@ -115,13 +116,29 @@ func tryPage(args []string) error {
 	if err != nil {
 		return err
 	}
+	starter, ok := emb.(interface {
+		Start(context.Context) error
+		ReleaseHold()
+		Close() error
+	})
+	if !ok {
+		return errors.New("urag: 嵌入进程无法常驻")
+	}
+	if err := starter.Start(ctx); err != nil {
+		return err
+	}
+	defer func() { _ = starter.Close() }()
+	// 权重留在这个进程里。闸放开后，bge 重排才能启动，并且用完退出。
+	starter.ReleaseHold()
 	ln, addr, err := listenTry()
 	if err != nil {
 		return err
 	}
 	fmt.Printf("试查页面 http://%s/try\n", addr)
 	fmt.Printf("向量检索 Milvus 集合 public，当前 %d 条\n", rows)
-	if !bm25Up {
+	if bm25Up {
+		fmt.Println("BM25 Elasticsearch 索引 public")
+	} else {
 		fmt.Println("BM25 未连接")
 	}
 	fmt.Printf("重排模型 %s\n", rerankInfo.Name)

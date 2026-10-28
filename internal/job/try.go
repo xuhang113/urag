@@ -20,7 +20,8 @@ const publicCollection model.CollectionID = "public"
 // 没有重排分时按混合分返回这最多 8 条，不套门槛。
 // KeepEmbed 时嵌入进程留到试查进程结束，提问结束不关掉它。
 // 否则嵌入器若能 Close，会在查询向量返回前关掉，然后再做向量检索和重排。
-// 嵌入进程还在时不启动重排模型。重排后保留分数最高的命中，再取父块。
+// 嵌入进程还占着模型闸时不启动重排模型。闸已经放开时，重排照常启动，用完退出。
+// 重排后保留分数最高的命中，再取父块。
 // ctx 取消或到点时，这些步骤一起停。
 // 其它集合不会被打开。query 空白时返回错误。
 // 夹具评价不走这里。
@@ -40,7 +41,8 @@ func (p *Pipeline) Try(ctx context.Context, query string) ([]retrieve.Hit, bool,
 
 	emb := p.deps.Embedder
 	if p.cfg.KeepEmbed {
-		if session, ok := emb.(embed.ForwardSession); ok && (session.Holding() || session.ProcessID() > 0) {
+		// 只在闸还被占着时跳过重排。进程留着但闸已放开时，bge 仍要打分并退出。
+		if session, ok := emb.(embed.ForwardSession); ok && session.Holding() {
 			pid := session.ProcessID()
 			p.notedEmbedPID = pid
 			ctx = retrieve.WithRerankPlan(ctx, retrieve.RerankPlan{

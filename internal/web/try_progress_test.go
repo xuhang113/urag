@@ -590,6 +590,80 @@ func TestTryReloadsEmbedBeforeEachRerank(t *testing.T) {
 	}
 }
 
+func TestTryKeepsEmbedLoadedAndStillReranks(t *testing.T) {
+	emb := &residentEmbedder{inner: embed.NewFixture(8), pid: os.Getpid(), holding: false}
+	rr := &scoreCountReranker{score: 0.9}
+	h := residentTryHandler(t, emb, rr, retrieve.DefaultRerankMinScore, false)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	first := &lockedBuffer{}
+	if err := readTryStream(ctx, srv.URL+"/api/try", "crimson lantern", first); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		retrieve.StepLoadEmbed,
+		retrieve.StepQueryVector,
+		retrieve.StepVectorSearch,
+		retrieve.StepBM25,
+		retrieve.StepRerank,
+		retrieve.StepUnloadRerank,
+	} {
+		assertFinishedStep(t, latestStep(t, first.String(), name))
+	}
+	if strings.Contains(first.String(), retrieve.StepEmbedResident) || strings.Contains(first.String(), retrieve.StepBM25Offline) || strings.Contains(first.String(), retrieve.StepParkEmbed) {
+		t.Fatalf("first query skipped load or BM25\n%s", first.String())
+	}
+
+	second := &lockedBuffer{}
+	if err := readTryStream(ctx, srv.URL+"/api/try", "crimson lantern", second); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		retrieve.StepEmbedResident,
+		retrieve.StepQueryVector,
+		retrieve.StepBM25,
+		retrieve.StepRerank,
+		retrieve.StepUnloadRerank,
+	} {
+		assertFinishedStep(t, latestStep(t, second.String(), name))
+	}
+	if strings.Contains(second.String(), retrieve.StepLoadEmbed) || strings.Contains(second.String(), retrieve.StepBM25Offline) || strings.Contains(second.String(), retrieve.StepUnloadEmbed) {
+		t.Fatalf("second query reloaded embed or skipped BM25\n%s", second.String())
+	}
+	if rr.n() != 2 || emb.wasClosed() {
+		t.Fatalf("reranks %d closed %v", rr.n(), emb.wasClosed())
+	}
+}
+
+type scoreCountReranker struct {
+	mu    sync.Mutex
+	calls int
+	score float64
+}
+
+func (s *scoreCountReranker) Score(ctx context.Context, _ string, passages []string) ([]float64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	out := make([]float64, len(passages))
+	for i := range out {
+		out[i] = s.score
+	}
+	return out, nil
+}
+
+func (s *scoreCountReranker) n() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
 func TestTryKeepsEmbedAndSkipsSecondModel(t *testing.T) {
 	emb := &residentEmbedder{inner: embed.NewFixture(8), pid: os.Getpid(), holding: true}
 	rr := &countReranker{}

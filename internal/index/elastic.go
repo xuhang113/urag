@@ -300,7 +300,8 @@ func elasticIndexName(id model.CollectionID) (string, error) {
 	if name != strings.ToLower(name) {
 		return "", fmt.Errorf("index: collection %q must be lowercase for elasticsearch", id)
 	}
-	return "urag-" + name, nil
+	// 索引名就是集合名。集合 public 的 Elasticsearch 索引是 public。
+	return name, nil
 }
 
 func dedupeElasticDocs(in []elasticDoc) []elasticDoc {
