@@ -107,3 +107,16 @@ func (m *splitIndex) SearchKeyword(ctx context.Context, q Query) ([]Hit, error) 
 	}
 	return m.keywords.SearchKeyword(ctx, q)
 }
+
+// BM25Connected 表示关键词索引能做 BM25。
+// 磁盘和内存没有这个方法，调用方把它们当成已连接。
+// 没连上 Elasticsearch 的试查索引返回 false，页面不能把这一步写成 BM25 完成。
+func (m *splitIndex) BM25Connected() bool {
+	type linker interface {
+		BM25Connected() bool
+	}
+	if link, ok := m.keywords.(linker); ok {
+		return link.BM25Connected()
+	}
+	return true
+}

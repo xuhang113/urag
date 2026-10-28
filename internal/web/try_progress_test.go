@@ -812,3 +812,66 @@ func (p *phaseReranker) Score(ctx context.Context, _ string, passages []string) 
 	}
 	return out, nil
 }
+
+func TestTryStreamSaysBM25Disconnected(t *testing.T) {
+	ctx := context.Background()
+	meta := embed.ModelMeta{Name: "fixture", Dim: 8}
+	diskReg, err := index.NewDisk(t.TempDir(), meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk := diskReg.(*index.Disk)
+	qvec := mustEmbed(t, embed.NewFixture(meta.Dim), embed.QueryText("crimson lantern"))
+	if err := disk.UpsertRecords(ctx, []index.VectorRecord{{
+		ChunkID: "c1", ParentID: 42, DocID: 7, CollectionID: "public",
+		HeadingPath: "东桥", Body: "crimson lantern east bridge",
+		Vector: qvec,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := index.NewSplit(disk, index.NewDisconnectedBM25())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := storage.NewLocal(t.TempDir(), storage.RetryPolicy{MaxAttempts: 3}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := job.New(job.Config{
+		DataDir:        t.TempDir(),
+		Weights:        retrieve.Weights{Vector: 0.7, Keyword: 0.3},
+		Chunk:          chunk.Options{MaxLen: 800, Overlap: 100},
+		RerankMinScore: retrieve.DefaultRerankMinScore,
+	}, job.Deps{
+		Store:    store,
+		Embedder: embed.NewFixture(meta.Dim),
+		Registry: reg,
+		Reranker: retrieve.NewOverlapReranker(),
+		Splitter: chunk.NewParagraph(),
+		Cleaner:  clean.New(clean.NewMemoryDeduper()),
+		Passages: fixedPassages{score: 0.9},
+		Parents:  parentBody{42: "父节正文"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(Handler(p))
+	defer srv.Close()
+
+	reqCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	body := &lockedBuffer{}
+	if err := readTryStream(reqCtx, srv.URL+"/api/try", "crimson lantern", body); err != nil {
+		t.Fatal(err)
+	}
+	text := body.String()
+	if !strings.Contains(text, `"name":"BM25 未连接","done":true`) {
+		t.Fatalf("offline step missing\n%s", text)
+	}
+	if strings.Contains(text, `"name":"BM25","done"`) {
+		t.Fatalf("page marked BM25 done while elasticsearch was disconnected\n%s", text)
+	}
+	if !strings.Contains(text, `"name":"向量检索","done":true`) || !strings.Contains(text, `"chunk_id":"c1"`) {
+		t.Fatalf("vector hit missing\n%s", text)
+	}
+}

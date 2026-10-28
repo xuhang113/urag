@@ -248,7 +248,7 @@ func TestTryDoesNotCreateVectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = run([]string{"try"})
-	if err == nil || !strings.Contains(err.Error(), "不会新建") {
+	if err == nil || !strings.Contains(err.Error(), "不会连接") {
 		t.Fatal(err)
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, "vectors")); !os.IsNotExist(statErr) {

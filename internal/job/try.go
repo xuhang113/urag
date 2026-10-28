@@ -13,7 +13,7 @@ import (
 // publicCollection 是试查页唯一打开的集合。
 const publicCollection model.CollectionID = "public"
 
-// Try 只在集合 public 里做磁盘向量检索和该集合的 BM25。
+// Try 只在集合 public 里检索。向量走注册表里的向量索引，BM25 走关键词索引。
 // 合并后留下前 50 条子块，再留下最多 8 条。
 // 第二个返回值表示这些分数来自重排器。只有这时才丢掉没有高于 RerankMinScore 的命中，可以返回 0 条。
 // 没有重排分时按混合分返回这最多 8 条，不套门槛。

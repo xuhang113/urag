@@ -346,6 +346,7 @@ func (s *service) RetrieveChildren(ctx context.Context, req Request, rerank Pass
 				CollectionID: id,
 				Vector:       vecs[0],
 				Tokens:       qtokens,
+				Text:         req.Query,
 				TopK:         childCandidateK,
 				Rank:         index.RankBM25,
 			},
@@ -363,18 +364,31 @@ func (s *service) RetrieveChildren(ctx context.Context, req Request, rerank Pass
 		opened[i].vec = hits
 	}
 	Report(ctx, StepVectorSearch, true)
-	Report(ctx, StepBM25, false)
-	for i := range opened {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+	connected := true
+	for _, item := range opened {
+		if !keywordBM25Connected(item.idx) {
+			connected = false
+			break
 		}
-		hits, err := opened[i].idx.SearchKeyword(ctx, opened[i].q)
-		if err != nil {
-			return nil, err
-		}
-		opened[i].kw = hits
 	}
-	Report(ctx, StepBM25, true)
+	if connected {
+		Report(ctx, StepBM25, false)
+		for i := range opened {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			hits, err := opened[i].idx.SearchKeyword(ctx, opened[i].q)
+			if err != nil {
+				return nil, err
+			}
+			opened[i].kw = hits
+		}
+		Report(ctx, StepBM25, true)
+	} else {
+		// 没连上关键词库。这一步不能标成 BM25 完成。
+		Report(ctx, StepBM25Offline, false)
+		Report(ctx, StepBM25Offline, true)
+	}
 	Report(ctx, StepMergeTop50, false)
 	merged := make([]Hit, 0)
 	for _, item := range opened {
@@ -457,6 +471,19 @@ func (s *service) scoreChildren(ctx context.Context, rerank PassageReranker, que
 		Report(ctx, StepUnloadRerank, true)
 	}
 	return scores, nil
+}
+
+// keywordBM25Connected 在索引声明自己没连上时返回 false。
+// 没有这个方法的磁盘和内存索引仍做进程内 BM25。
+func keywordBM25Connected(idx index.Index) bool {
+	type linker interface {
+		BM25Connected() bool
+	}
+	link, ok := idx.(linker)
+	if !ok {
+		return true
+	}
+	return link.BM25Connected()
 }
 
 func mergeChildHits(col model.CollectionID, vecHits, kwHits []index.Hit, w Weights) ([]Hit, error) {

@@ -27,6 +27,10 @@ type milvusSession interface {
 	Upsert(ctx context.Context, name string, rows []milvusRow) error
 	Flush(ctx context.Context, name string) error
 	Search(ctx context.Context, name string, vec []float32, topK int) ([]milvusHit, error)
+	// ChunkVersions 列出已有主键和版本。不创建集合。
+	ChunkVersions(ctx context.Context, name string) (map[string]int64, error)
+	// Count 是集合行数。不创建集合。
+	Count(ctx context.Context, name string) (int, error)
 }
 
 // milvusRow 是一个集合里的一条子块。正文是清洗后的子块，不是 PDF 或 DOCX。
@@ -257,6 +261,54 @@ func (m *Milvus) connection(ctx context.Context) (milvusSession, error) {
 	}
 	m.session = session
 	return session, nil
+}
+
+// Count 返回点名集合的行数。集合不存在时返回错误，不创建。
+func (m *Milvus) Count(ctx context.Context, id model.CollectionID) (int, error) {
+	session, name, err := m.ensure(ctx, id, false)
+	if err != nil {
+		return 0, err
+	}
+	n, err := session.Count(ctx, name)
+	if err != nil {
+		return 0, m.fail(err)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("index: milvus collection %s row count %d", name, n)
+	}
+	return n, nil
+}
+
+// ChunkVersions 返回点名集合里已有的 chunk_id 和 version。
+// 集合不存在时返回错误，不创建。
+func (m *Milvus) ChunkVersions(ctx context.Context, id model.CollectionID) (map[string]int64, error) {
+	session, name, err := m.ensure(ctx, id, false)
+	if err != nil {
+		return nil, err
+	}
+	got, err := session.ChunkVersions(ctx, name)
+	if err != nil {
+		return nil, m.fail(err)
+	}
+	if got == nil {
+		got = map[string]int64{}
+	}
+	return got, nil
+}
+
+// FlushCollection 把点名集合刷盘。没写过也可以调用。
+func (m *Milvus) FlushCollection(ctx context.Context, id model.CollectionID) error {
+	session, name, err := m.ensure(ctx, id, false)
+	if err != nil {
+		return err
+	}
+	if err := session.Flush(ctx, name); err != nil {
+		return m.fail(err)
+	}
+	m.mu.Lock()
+	delete(m.dirty, name)
+	m.mu.Unlock()
+	return nil
 }
 
 func (m *Milvus) markDirty(name string) {

@@ -250,6 +250,26 @@ func (f *fakeMilvus) Flush(_ context.Context, name string) error {
 	return nil
 }
 
+func (f *fakeMilvus) ChunkVersions(_ context.Context, name string) (map[string]int64, error) {
+	f.calls = append(f.calls, "versions:"+name)
+	if !f.exists[name] {
+		return nil, errors.New("missing")
+	}
+	out := make(map[string]int64, len(f.rows[name]))
+	for _, row := range f.rows[name] {
+		out[row.ChunkID] = row.Version
+	}
+	return out, nil
+}
+
+func (f *fakeMilvus) Count(_ context.Context, name string) (int, error) {
+	f.calls = append(f.calls, "count:"+name)
+	if !f.exists[name] {
+		return 0, errors.New("missing")
+	}
+	return len(f.rows[name]), nil
+}
+
 func (f *fakeMilvus) Search(_ context.Context, name string, vec []float32, topK int) ([]milvusHit, error) {
 	f.calls = append(f.calls, "search:"+name)
 	if !f.exists[name] {

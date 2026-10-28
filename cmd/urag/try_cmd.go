@@ -25,8 +25,9 @@ import (
 	"github.com/xuhang113/urag/internal/web"
 )
 
-// tryPage 在本机打开磁盘向量试查页。
-// 只打开集合 public。不连接 Milvus，不新建向量文件，也不把连接串写进输出。
+// tryPage 在本机打开试查页。
+// 向量检索只读 Milvus 里的集合 public。不读磁盘索引，不新建向量文件，也不把连接串写进输出。
+// Elasticsearch 没连上时，提问日志写「BM25 未连接」，不用进程内 BM25 冒充。
 // 每次提问加载嵌入，查询向量返回后嵌入进程退出，再加载重排，重排结束后重排进程退出。
 // 两个模型不同时留在内存里。下一次提问再加载嵌入。
 // 重排目录来自 URAG_RERANK_MODEL_DIR。未设置时用嵌入目录旁边的 Qwen3-Reranker-4B。
@@ -35,16 +36,9 @@ func tryPage(args []string) error {
 	if len(args) != 0 {
 		return errors.New("urag: try 不接收参数")
 	}
-	dataDir := strings.TrimSpace(os.Getenv("URAG_DATA_DIR"))
-	if dataDir == "" {
-		return errors.New("urag: 缺少 URAG_DATA_DIR，不会新建磁盘向量")
-	}
-	root := filepath.Join(dataDir, "vectors")
-	if _, err := os.Stat(filepath.Join(root, "meta.json")); err != nil {
-		return errors.New("urag: 磁盘向量元数据不存在，不会新建")
-	}
-	if _, err := os.Stat(filepath.Join(root, "collections", "public", "records.bin")); err != nil {
-		return errors.New("urag: 集合 public 的磁盘向量不存在，不会新建")
+	addr, err := milvusAddr()
+	if err != nil {
+		return err
 	}
 	modelDir := strings.TrimSpace(os.Getenv("URAG_EMBED_MODEL_DIR"))
 	if modelDir == "" {
@@ -65,9 +59,28 @@ func tryPage(args []string) error {
 	if err != nil {
 		return err
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	// 不常驻嵌入。常驻会占着模型闸，重排无法启动。
 	// 每次 Embed 单独起一个进程，返回前进程退出，然后再 Score。
-	reg, err := index.NewDisk(root, qwenMeta)
+	// 向量只走 Milvus。没有地址时 milvusAddr 已经退出，这里不再猜地址，也不打开磁盘索引。
+	writer, err := index.NewMilvusWriter(addr, qwenMeta)
+	if err != nil {
+		return err
+	}
+	defer writer.Close()
+	rows, err := writer.Count(ctx, "public")
+	if err != nil {
+		return errors.New("urag: 打不开 Milvus 集合 public")
+	}
+	keywords, bm25Up, err := openTryKeywords(ctx)
+	if err != nil {
+		return err
+	}
+	if closer, ok := keywords.(interface{ Close() error }); ok {
+		defer closer.Close()
+	}
+	reg, err := index.NewSplit(writer, keywords)
 	if err != nil {
 		return err
 	}
@@ -102,13 +115,15 @@ func tryPage(args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	ln, addr, err := listenTry()
 	if err != nil {
 		return err
 	}
 	fmt.Printf("试查页面 http://%s/try\n", addr)
+	fmt.Printf("向量检索 Milvus 集合 public，当前 %d 条\n", rows)
+	if !bm25Up {
+		fmt.Println("BM25 未连接")
+	}
 	fmt.Printf("重排模型 %s\n", rerankInfo.Name)
 	fmt.Printf("重排目录 %s\n", rerankInfo.Dir)
 	srv := &http.Server{
@@ -134,6 +149,24 @@ func tryPage(args []string) error {
 		}
 		return err
 	}
+}
+
+// openTryKeywords 在 Elasticsearch 能连上时返回它。
+// 没设置地址，或端口没有进程时，返回未连接的关键词索引，不在进程内做 BM25。
+func openTryKeywords(ctx context.Context) (index.Registry, bool, error) {
+	addr := strings.TrimSpace(os.Getenv("URAG_ELASTIC_ADDR"))
+	up, err := index.ElasticReady(ctx, addr)
+	if err != nil {
+		return nil, false, errors.New("urag: URAG_ELASTIC_ADDR 必须是 http 或 https 地址")
+	}
+	if !up {
+		return index.NewDisconnectedBM25(), false, nil
+	}
+	es, err := index.NewElastic(addr)
+	if err != nil {
+		return nil, false, errors.New("urag: Elasticsearch 地址无法使用")
+	}
+	return es, true, nil
 }
 
 func listenTry() (net.Listener, string, error) {

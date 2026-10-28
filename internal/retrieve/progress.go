@@ -18,8 +18,10 @@ const (
 	StepQueryVector = "计算查询向量"
 	// StepVectorSearch 是磁盘或内存上的向量检索。
 	StepVectorSearch = "向量检索"
-	// StepBM25 是当前集合的 BM25。
+	// StepBM25 是当前集合的 BM25。Elasticsearch 连着时才用这个名字。
 	StepBM25 = "BM25"
+	// StepBM25Offline 表示这次没有连上 Elasticsearch，不能把进程内分数写成 BM25。
+	StepBM25Offline = "BM25 未连接"
 	// StepMergeTop50 是向量和 BM25 合并后留下的前 50 条。
 	StepMergeTop50 = "合并前 50 条"
 	// StepUnloadEmbed 是嵌入进程退出。它发生在向量检索之前，因为查询向量一返回进程就退出。

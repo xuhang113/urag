@@ -2,9 +2,12 @@ package index
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"strconv"
+	"strings"
 
 	"github.com/milvus-io/milvus-sdk-go/v2/client"
 	"github.com/milvus-io/milvus-sdk-go/v2/entity"
@@ -139,6 +142,68 @@ func (s *sdkSession) Upsert(ctx context.Context, name string, rows []milvusRow) 
 
 func (s *sdkSession) Flush(ctx context.Context, name string) error {
 	return s.cli.Flush(ctx, name, false)
+}
+
+func (s *sdkSession) Count(ctx context.Context, name string) (int, error) {
+	stats, err := s.cli.GetCollectionStatistics(ctx, name)
+	if err != nil {
+		return 0, err
+	}
+	raw, ok := stats["row_count"]
+	if !ok {
+		return 0, fmt.Errorf("index: milvus collection %s has no row count", name)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, fmt.Errorf("index: milvus collection %s row count %q", name, raw)
+	}
+	return n, nil
+}
+
+// ChunkVersions 按主键分页读出 chunk_id 和 version。向量不读出来。
+func (s *sdkSession) ChunkVersions(ctx context.Context, name string) (map[string]int64, error) {
+	if err := s.cli.LoadCollection(ctx, name, false); err != nil {
+		return nil, err
+	}
+	opt := client.NewQueryIteratorOption(name).
+		WithExpr(fieldChunkID+` != ""`).
+		WithOutputFields(fieldChunkID, fieldVersion).
+		WithBatchSize(1024)
+	itr, err := s.cli.QueryIterator(ctx, opt)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]int64)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		rs, err := itr.Next(ctx)
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		ids := rs.GetColumn(fieldChunkID)
+		vers := rs.GetColumn(fieldVersion)
+		if ids == nil || vers == nil || ids.Len() != vers.Len() {
+			return nil, fmt.Errorf("index: milvus collection %s chunk columns", name)
+		}
+		for i := 0; i < ids.Len(); i++ {
+			id, err := ids.GetAsString(i)
+			if err != nil {
+				return nil, err
+			}
+			ver, err := vers.GetAsInt64(i)
+			if err != nil {
+				return nil, err
+			}
+			if prev, ok := out[id]; !ok || ver >= prev {
+				out[id] = ver
+			}
+		}
+	}
 }
 
 func (s *sdkSession) Search(ctx context.Context, name string, vec []float32, topK int) ([]milvusHit, error) {

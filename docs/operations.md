@@ -113,17 +113,17 @@ go run ./cmd/urag serve
 - `POST /api/try`
 - `POST /api/eval` 和 `GET /api/eval/report`
 
-## 磁盘试查
+## 试查
 
-`urag try` 只打开磁盘索引里的集合 `public`，用来看已经写入磁盘的向量。不连接 Milvus，不新建向量文件，也不启动收录。
+`urag try` 只打开集合 `public`。向量检索读 `URAG_MILVUS_ADDR` 上的这个 Milvus collection。没有这个地址就退出，不猜地址，也不改读磁盘索引。不新建向量文件，也不启动收录。Elasticsearch 没启动，或没有 `URAG_ELASTIC_ADDR` 时，页面日志写「BM25 未连接」，不用进程内 BM25 冒充已经查过 Elasticsearch。重排仍用 `URAG_RERANK_MODEL_DIR`。
 
 ```bash
 go run ./cmd/urag try
 ```
 
-`URAG_DATA_DIR/vectors` 里要已有该集合的 `records.bin`。嵌入权重是 `URAG_EMBED_MODEL_DIR`。重排权重优先用 `URAG_RERANK_MODEL_DIR`，否则找嵌入目录旁边的 `Qwen3-Reranker-4B`。目录不存在就退出，不下载。页面写出这次的模型名和目录。日志里的「重排模型 …」一行带开始时间、结束时间和耗时。只有真正拿到重排分时才按 `URAG_RERANK_MIN_SCORE` 过滤。
+嵌入权重是 `URAG_EMBED_MODEL_DIR`。重排权重优先用 `URAG_RERANK_MODEL_DIR`，否则找嵌入目录旁边的 `Qwen3-Reranker-4B`。目录不存在就退出，不下载。页面写出这次的模型名和目录。日志里的「重排模型 …」一行带开始时间、结束时间和耗时。只有真正拿到重排分时才按 `URAG_RERANK_MIN_SCORE` 过滤。
 
-页面监听 `127.0.0.1:8080`。这个端口已被占用时改用 `127.0.0.1:8088`。浏览器打开 `/try`。`POST /api/try` 的 JSON 只有 `query`。向量和该集合 BM25 合并后留下前 50 条。拿到 Qwen 重排分之后，只返回分数高于 `URAG_RERANK_MIN_SCORE` 的命中，最多 8 条。没有达到门槛时页面写「没有足够相关的片段」，不用低分结果填满 8 行。没有重排分时不套这道门槛，按混合分返回最多 8 条，每条带分数，页面写「本次没有重排分，未按 0.5 过滤」。响应里的 `chunk` 是子块，`parent` 是父块正文；父块查不到时没有 `parent`。原文位置是 `start_byte` 和 `end_byte`。不带 `Accept: text/event-stream` 时响应仍是命中 JSON 数组。
+页面监听 `127.0.0.1:8080`。这个端口已被占用时改用 `127.0.0.1:8088`。浏览器打开 `/try`。`POST /api/try` 的 JSON 只有 `query`。Milvus 向量和已连接的 BM25 合并后留下前 50 条。Elasticsearch 没连上时，这一步是「BM25 未连接」，合并只用向量命中。拿到重排分之后，只返回分数高于 `URAG_RERANK_MIN_SCORE` 的命中，最多 8 条。没有达到门槛时页面写「没有足够相关的片段」，不用低分结果填满 8 行。没有重排分时不套这道门槛，按混合分返回最多 8 条，每条带分数，页面写「本次没有重排分，未按 0.5 过滤」。响应里的 `chunk` 是子块，`parent` 是父块正文；父块查不到时没有 `parent`。原文位置是 `start_byte` 和 `end_byte`。不带 `Accept: text/event-stream` 时响应仍是命中 JSON 数组。
 
 试查进程启动时加载一次嵌入模型，并留到进程结束。后面的提问不再重新加载，页面日志写「嵌入模型已在内存」。一次提问结束不退出这个进程。重排模型若单独运行，仍然每次用完就退出，并且不和嵌入模型同时留在内存里。重排前记下嵌入进程；嵌入进程还在时不再启动重排模型，这时没有重排分，按混合分返回。空闲内存不够再放一个约 7.5GB 的模型时，第一次在页面日志写「为重排暂时卸下嵌入」。查询向量继续用常驻嵌入，避免每次提问都重新加载权重。
 

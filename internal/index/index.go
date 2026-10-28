@@ -28,10 +28,12 @@ const RankBM25 = "bm25"
 // Query 是对一个集合的查询。CollectionID 必须点名。
 // Rank 为空时 SearchKeyword 使用词重叠比例。
 // Rank 为 RankBM25 时，分数只来自本集合的关键词索引。
+// Text 是原始查询。Elasticsearch 用它做中文分析。内存和磁盘上的 BM25 仍使用 Tokens。
 type Query struct {
 	CollectionID model.CollectionID
 	Vector       embed.Vector
 	Tokens       []string
+	Text         string
 	TopK         int
 	Rank         string
 }
