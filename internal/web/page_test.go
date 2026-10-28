@@ -440,6 +440,17 @@ func TestPageTry(t *testing.T) {
 	if !strings.Contains(body, "算完查询向量后卸下嵌入") || !strings.Contains(body, "再加载重排模型") || !strings.Contains(body, "嵌入设备") {
 		t.Fatalf("try page missing sequential rerank: %s", body)
 	}
+	if !strings.Contains(body, "URAG_RERANK_MODEL_DIR") || !strings.Contains(body, "Qwen3-Reranker-4B") || !strings.Contains(body, "重排模型名") {
+		t.Fatalf("try page missing rerank model config: %s", body)
+	}
+	configured := web.NewHandler(nil, web.TryInfo{
+		RerankModel: "BAAI/bge-reranker-base",
+		RerankDir:   "/models/bge-reranker-base",
+	})
+	shown := get(t, configured, "/try")
+	if shown.Code != http.StatusOK || !strings.Contains(shown.Body.String(), "BAAI/bge-reranker-base") || !strings.Contains(shown.Body.String(), "/models/bge-reranker-base") {
+		t.Fatalf("configured rerank: %d %s", shown.Code, shown.Body.String())
+	}
 	if !strings.Contains(body, `id="try-note"`) || !strings.Contains(body, "payload.note") || !strings.Contains(body, "hit.score") {
 		t.Fatalf("try page missing hybrid score note: %s", body)
 	}

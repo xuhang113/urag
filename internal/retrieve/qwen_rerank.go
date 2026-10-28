@@ -5,11 +5,6 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
-	"io"
-	"math"
-	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/xuhang113/urag/internal/embed"
 )
@@ -34,6 +29,7 @@ type PassageReranker interface {
 
 type qwenReranker struct {
 	dir  string
+	name string
 	argv []string
 }
 
@@ -50,34 +46,24 @@ func NewQwenRerankerCommand(dir string, argv []string) (PassageReranker, error) 
 	if argv != nil && len(argv) == 0 {
 		return nil, fmt.Errorf("retrieve: empty rerank command")
 	}
-	abs, err := filepath.Abs(dir)
+	info, err := InspectReranker(dir)
 	if err != nil {
 		return nil, err
 	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("retrieve: qwen reranker directory %q does not exist", dir)
+	if info.Kind != KindQwen4B {
+		hidden := info.Hidden
+		if hidden == 0 {
+			hidden = -1
 		}
+		return nil, fmt.Errorf("retrieve: qwen reranker hidden size %d, want 2560, refusing to change dimension", hidden)
+	}
+	if err := embed.WeightsReady(info.Dir, "retrieve: qwen reranker"); err != nil {
 		return nil, err
 	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("retrieve: qwen reranker path %q is not a directory", dir)
-	}
-	snap, err := embed.ResolveSnapshot(abs, "retrieve: qwen reranker")
-	if err != nil {
+	if err := embed.TokenizerReady(info.Dir, "retrieve: qwen reranker"); err != nil {
 		return nil, err
 	}
-	if err := readRerankHidden(snap); err != nil {
-		return nil, err
-	}
-	if err := embed.WeightsReady(snap, "retrieve: qwen reranker"); err != nil {
-		return nil, err
-	}
-	if err := embed.TokenizerReady(snap, "retrieve: qwen reranker"); err != nil {
-		return nil, err
-	}
-	return qwenReranker{dir: snap, argv: append([]string(nil), argv...)}, nil
+	return qwenReranker{dir: info.Dir, name: info.Name, argv: append([]string(nil), argv...)}, nil
 }
 
 func (q qwenReranker) Score(ctx context.Context, query string, passages []string) ([]float64, error) {
@@ -107,7 +93,7 @@ func (q qwenReranker) Score(ctx context.Context, query string, passages []string
 		Pairs    []string `json:"pairs"`
 	}{
 		Task:     "rerank",
-		Model:    QwenRerankerName,
+		Model:    q.name,
 		ModelDir: q.dir,
 		Query:    query,
 		Passages: passages,
@@ -116,25 +102,11 @@ func (q qwenReranker) Score(ctx context.Context, query string, passages []string
 	if err != nil {
 		return nil, err
 	}
-	out, err := embed.RunLocalProcess(ctx, embed.KindRerank, argv, payload)
+	out, err := finishRerank(ctx, q.name, argv, payload)
 	if err != nil {
 		return nil, err
 	}
-	var parsed struct {
-		Scores []float64 `json:"scores"`
-	}
-	if err := json.Unmarshal(out, &parsed); err != nil {
-		return nil, fmt.Errorf("retrieve: qwen rerank output: %w", err)
-	}
-	if len(parsed.Scores) != len(passages) {
-		return nil, fmt.Errorf("retrieve: qwen rerank returned %d scores for %d passages", len(parsed.Scores), len(passages))
-	}
-	for _, score := range parsed.Scores {
-		if math.IsNaN(score) {
-			return nil, fmt.Errorf("retrieve: qwen rerank returned NaN")
-		}
-	}
-	return parsed.Scores, nil
+	return parseRerankScores(out, len(passages), "qwen")
 }
 
 func (q qwenReranker) command() ([]string, error) {
@@ -145,37 +117,5 @@ func (q qwenReranker) command() ([]string, error) {
 }
 
 func rerankPair(query, passage string) string {
-	question := query
-	if strings.HasPrefix(query, embed.QueryInstruct) {
-		question = query[len(embed.QueryInstruct):]
-	}
-	return "<Instruct>: " + rerankTask + "\n<Query>:" + question + "\n<Document>:" + passage
-}
-
-func readRerankHidden(dir string) error {
-	f, err := os.Open(filepath.Join(dir, "config.json"))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("retrieve: qwen reranker config missing in %q, refusing to download", dir)
-		}
-		return err
-	}
-	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, 1<<20))
-	if err != nil {
-		return err
-	}
-	var cfg struct {
-		HiddenSize int `json:"hidden_size"`
-	}
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return fmt.Errorf("retrieve: qwen reranker config: %w", err)
-	}
-	if cfg.HiddenSize == 0 {
-		return fmt.Errorf("retrieve: qwen reranker config in %q has no hidden size, refusing to download", dir)
-	}
-	if cfg.HiddenSize != 2560 {
-		return fmt.Errorf("retrieve: qwen reranker hidden size %d, want 2560, refusing to change dimension", cfg.HiddenSize)
-	}
-	return nil
+	return "<Instruct>: " + rerankTask + "\n<Query>:" + rerankQuestion(query) + "\n<Document>:" + passage
 }

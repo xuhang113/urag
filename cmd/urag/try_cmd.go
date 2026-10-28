@@ -29,6 +29,8 @@ import (
 // 只打开集合 public。不连接 Milvus，不新建向量文件，也不把连接串写进输出。
 // 每次提问加载嵌入，查询向量返回后嵌入进程退出，再加载重排，重排结束后重排进程退出。
 // 两个模型不同时留在内存里。下一次提问再加载嵌入。
+// 重排目录来自 URAG_RERANK_MODEL_DIR。未设置时用嵌入目录旁边的 Qwen3-Reranker-4B。
+// 目录是 cross-encoder 时用小模型打分，否则仍用 Qwen 重排。不下载权重。
 func tryPage(args []string) error {
 	if len(args) != 0 {
 		return errors.New("urag: try 不接收参数")
@@ -73,7 +75,7 @@ func tryPage(args []string) error {
 	if err != nil {
 		return err
 	}
-	rr, err := retrieve.NewQwenReranker(rdir)
+	rr, rerankInfo, err := openTryReranker(rdir)
 	if err != nil {
 		return err
 	}
@@ -107,8 +109,13 @@ func tryPage(args []string) error {
 		return err
 	}
 	fmt.Printf("试查页面 http://%s/try\n", addr)
+	fmt.Printf("重排模型 %s\n", rerankInfo.Name)
+	fmt.Printf("重排目录 %s\n", rerankInfo.Dir)
 	srv := &http.Server{
-		Handler:           web.Handler(pipeline),
+		Handler: web.NewHandler(pipeline, web.TryInfo{
+			RerankModel: rerankInfo.Name,
+			RerankDir:   rerankInfo.Dir,
+		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	errCh := make(chan error, 1)
@@ -142,6 +149,27 @@ func listenTry() (net.Listener, string, error) {
 		}
 	}
 	return nil, "", fmt.Errorf("urag: 127.0.0.1:8080 和 127.0.0.1:8088 都无法监听: %w", last)
+}
+
+// openTryReranker 按目录里的 config.json 选择重排器。
+// cross-encoder 走小模型。其余仍走 NewQwenReranker，默认是 Qwen3-Reranker-4B。
+// 权重不在本机时返回错误，不下载。
+func openTryReranker(dir string) (retrieve.PassageReranker, retrieve.LocalReranker, error) {
+	info, err := retrieve.InspectReranker(dir)
+	if err != nil {
+		return nil, retrieve.LocalReranker{}, err
+	}
+	var rr retrieve.PassageReranker
+	switch info.Kind {
+	case retrieve.KindCrossEncoder:
+		rr, err = retrieve.NewCrossEncoderReranker(dir)
+	default:
+		rr, err = retrieve.NewQwenReranker(dir)
+	}
+	if err != nil {
+		return nil, retrieve.LocalReranker{}, err
+	}
+	return rr, info, nil
 }
 
 // tryRerankDir 优先使用已经设好的 URAG_RERANK_MODEL_DIR。

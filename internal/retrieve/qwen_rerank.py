@@ -84,6 +84,10 @@ def score_batch(req):
     if not isinstance(pairs, list) or not pairs:
         raise SystemExit("rerank batch is empty")
     require_hidden(model_dir)
+    name = req.get("model") or "Qwen/Qwen3-Reranker-4B"
+    name = " ".join(str(name).split())
+    if name:
+        note("rerank_model " + name)
 
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -153,6 +157,8 @@ def score_batch(req):
     if len(values) != len(pairs):
         raise SystemExit("score count does not match the batch")
     note("rerank_done")
+    if name:
+        note("rerank_model_done " + name)
     return {"scores": values}
 
 

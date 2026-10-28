@@ -204,6 +204,9 @@ func noteModelStep(ctx context.Context, token string) {
 	if noteDevice(ctx, token, "embed_device_done ", true) || noteDevice(ctx, token, "embed_device ", false) {
 		return
 	}
+	if noteRerankModel(ctx, token) {
+		return
+	}
 	switch token {
 	case "load_embed_done":
 		Report(ctx, StepLoadEmbed, true)
@@ -230,6 +233,27 @@ func noteModelStep(ctx context.Context, token string) {
 	case "unload_rerank_done":
 		Report(ctx, StepUnloadRerank, true)
 	}
+}
+
+// noteRerankModel 把重排进程报上来的模型名写成页面步骤。
+// 名称形如「重排模型 BAAI/bge-reranker-base」。done 前缀必须先匹配。
+func noteRerankModel(ctx context.Context, token string) bool {
+	const donePrefix = "rerank_model_done "
+	const startPrefix = "rerank_model "
+	prefix := startPrefix
+	done := false
+	if strings.HasPrefix(token, donePrefix) {
+		prefix = donePrefix
+		done = true
+	} else if !strings.HasPrefix(token, startPrefix) {
+		return false
+	}
+	spec := strings.TrimSpace(strings.TrimPrefix(token, prefix))
+	if spec == "" || strings.ContainsAny(spec, "\n\r") {
+		return false
+	}
+	Report(ctx, RerankModelStep(spec), done)
+	return true
 }
 
 // noteDevice 把嵌入进程报上来的 device 和 dtype 写成页面步骤。

@@ -35,8 +35,16 @@ func Listen(addr string, p *job.Pipeline) error {
 	return srv.ListenAndServe()
 }
 
+// TryInfo 是试查页上展示的重排模型。目录由 URAG_RERANK_MODEL_DIR 决定。
+// 两个字段都空时，页面写明未设置则默认使用 Qwen3-Reranker-4B。
+type TryInfo struct {
+	RerankModel string
+	RerankDir   string
+}
+
 type server struct {
-	p *job.Pipeline
+	p       *job.Pipeline
+	tryInfo TryInfo
 }
 
 // Handler 注册页面和 JSON API。
@@ -55,7 +63,13 @@ type server struct {
 //	嵌入或重排在 trySearchTimeout 内没有返回时，结束这次请求。
 //	POST /api/eval 与 GET /api/eval/report 同时返回正常和对照报告。
 func Handler(p *job.Pipeline) http.Handler {
-	s := &server{p: p}
+	return NewHandler(p, TryInfo{})
+}
+
+// NewHandler 与 Handler 注册同样的路由。
+// info 把这次试查实际使用的重排模型写到页面上。
+func NewHandler(p *job.Pipeline, info TryInfo) http.Handler {
+	s := &server{p: p, tryInfo: info}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.home)
 	mux.HandleFunc("GET /upload", s.pageUpload)

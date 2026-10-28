@@ -204,6 +204,8 @@ func TestQwenRerankScriptIsLocal(t *testing.T) {
 		"2560",
 		"load_rerank_done",
 		"rerank_done",
+		"rerank_model ",
+		"rerank_model_done ",
 		"URAG_STEP_FD",
 		"last_hidden_state",
 		"lm_head",

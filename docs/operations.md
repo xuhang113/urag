@@ -33,7 +33,8 @@
 | `URAG_MYSQL_DSN` | `urag crawl` 的台账连接。没有它时收录命令退出 | 假 DSN，见 `.env.example` |
 | `URAG_EMBED_MODEL_DIR` | 本地嵌入权重目录。目录不存在时收录命令退出，不下载 | 已有目录 |
 | `URAG_COLLECTION` | 收录写入的集合 | `public` |
-| `URAG_RERANK_MIN_SCORE` | 真正拿到 Qwen 重排分之后的门槛。试查页没有重排分时不使用它，按混合分最多返回 8 条。`urag search` 先重排再套这道门槛。低于此视为不相关，可以是 0 条。夹具评价不使用它 | `0.5` |
+| `URAG_RERANK_MIN_SCORE` | 真正拿到重排分之后的门槛。试查页没有重排分时不使用它，按混合分最多返回 8 条。`urag search` 先重排再套这道门槛。低于此视为不相关，可以是 0 条。夹具评价不使用它 | `0.5` |
+| `URAG_RERANK_MODEL_DIR` | 试查重排权重目录。未设置时用嵌入目录旁边的 `Qwen3-Reranker-4B`。目录是 sequence-classification cross-encoder 时用小模型打分，否则仍用 Qwen3-Reranker-4B。目录不存在时退出，不下载 | 已有目录 |
 
 `URAG_STORAGE=s3` 且端点、桶或密钥缺失时，进程退出并提示，不会伪造客户端。未设置 `URAG_EMBED_ENDPOINT` 时不会访问嵌入服务。`urag crawl` 在缺少 `URAG_MYSQL_DSN` 或 `URAG_EMBED_MODEL_DIR` 时退出，不会下载权重。
 
@@ -67,7 +68,7 @@ go run ./cmd/urag crawl seeds.txt
 
 `embed.NewQwen` 只读本机目录里的 `Qwen/Qwen3-Embedding-4B`。`config.json` 的 `hidden_size` 必须是 2560，并且目录里要有完整权重和分词器；否则返回错误，不下载，不降维，也不把 `Qwen3-Embedding-0.6B` 当成可用模型。`URAG_EMBED_MODEL_DIR` 可以是快照目录，也可以是 Hugging Face 缓存根目录 `models--Qwen--Qwen3-Embedding-4B`。程序只打开本机 `refs/main` 指向的快照；断掉的符号链接、缺分片或没有分词器都直接失败，不补下载。建索引时只加载这个嵌入模型。`urag crawl` 在整次收录开始时启动一个 `python3`，进程保持到收录结束、失败或取消。每一批文本从 stdin 送进去，stdout 回一行 2560 维向量。模型只在第一批加载，留在启动时选定的 device 上（本机有 MPS 就用 MPS 和 float16，中途失败也不换到 CPU）。Go 不把整库向量留在内存里。批大小是 `URAG_EMBED_BATCH_SIZE`，默认 64，最大 256。文档按原文编码，不加指令。查询只使用已经拼好的 `embed.QueryText`。原文不写入对象存储。收录不加载重排模型。
 
-重排模型是 `Qwen/Qwen3-Reranker-4B`，由 `NewQwenReranker` 另行加载。它的目录同样可以是缓存根目录 `models--Qwen--Qwen3-Reranker-4B`。它只给调用方送来的段落打分，不查库，不生成答案。收录期间嵌入子进程一直占着模型闸。它退出之后，重排子进程才可以启动，两个模型不会同时常驻。指令与嵌入相同：`Instruct: Given a web search query, retrieve relevant passages that answer the query`，`Query:` 后面直接接问题。本机没有重排模型卡，程序不联网打开模型页。前向使用本机已有的 Python，还需要该环境里的 `torch` 和 `transformers`；程序不替你安装，也不下载权重。
+重排模型默认是 `Qwen/Qwen3-Reranker-4B`，由 `NewQwenReranker` 另行加载。它的目录同样可以是缓存根目录 `models--Qwen--Qwen3-Reranker-4B`。它只给调用方送来的段落打分，不查库，不生成答案。收录期间嵌入子进程一直占着模型闸。它退出之后，重排子进程才可以启动，两个模型不会同时常驻。指令与嵌入相同：`Instruct: Given a web search query, retrieve relevant passages that answer the query`，`Query:` 后面直接接问题。本机没有重排模型卡，程序不联网打开模型页。前向使用本机已有的 Python，还需要该环境里的 `torch` 和 `transformers`；程序不替你安装，也不下载权重。试查页可以用 `URAG_RERANK_MODEL_DIR` 指向本机已有的 cross-encoder 目录，例如 `BAAI/bge-reranker-base`。未设置时仍加载 `Qwen3-Reranker-4B`。程序不下载这个小模型。
 
 ## 生产检索
 
@@ -120,7 +121,7 @@ go run ./cmd/urag serve
 go run ./cmd/urag try
 ```
 
-`URAG_DATA_DIR/vectors` 里要已有该集合的 `records.bin`。嵌入权重是 `URAG_EMBED_MODEL_DIR`。重排权重优先用 `URAG_RERANK_MODEL_DIR`，否则找嵌入目录旁边的 `Qwen3-Reranker-4B`。目录不存在就退出，不下载。
+`URAG_DATA_DIR/vectors` 里要已有该集合的 `records.bin`。嵌入权重是 `URAG_EMBED_MODEL_DIR`。重排权重优先用 `URAG_RERANK_MODEL_DIR`，否则找嵌入目录旁边的 `Qwen3-Reranker-4B`。目录不存在就退出，不下载。页面写出这次的模型名和目录。日志里的「重排模型 …」一行带开始时间、结束时间和耗时。只有真正拿到重排分时才按 `URAG_RERANK_MIN_SCORE` 过滤。
 
 页面监听 `127.0.0.1:8080`。这个端口已被占用时改用 `127.0.0.1:8088`。浏览器打开 `/try`。`POST /api/try` 的 JSON 只有 `query`。向量和该集合 BM25 合并后留下前 50 条。拿到 Qwen 重排分之后，只返回分数高于 `URAG_RERANK_MIN_SCORE` 的命中，最多 8 条。没有达到门槛时页面写「没有足够相关的片段」，不用低分结果填满 8 行。没有重排分时不套这道门槛，按混合分返回最多 8 条，每条带分数，页面写「本次没有重排分，未按 0.5 过滤」。响应里的 `chunk` 是子块，`parent` 是父块正文；父块查不到时没有 `parent`。原文位置是 `start_byte` 和 `end_byte`。不带 `Accept: text/event-stream` 时响应仍是命中 JSON 数组。
 

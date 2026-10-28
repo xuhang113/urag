@@ -281,11 +281,79 @@ func TestTryCommandDoesNotWriteDSN(t *testing.T) {
 	if !strings.Contains(text, "URAG_MYSQL_DSN") || !strings.Contains(text, "NewQwenReranker") {
 		t.Fatal("try command missing ledger or rerank hook")
 	}
+	if !strings.Contains(text, "URAG_RERANK_MODEL_DIR") || !strings.Contains(text, "NewCrossEncoderReranker") {
+		t.Fatal("try command missing configurable rerank directory")
+	}
 	if strings.Contains(text, "KeepEmbed") || strings.Contains(text, "starter.Start") || strings.Contains(text, "ParkEmbed") {
 		t.Fatal("try still keeps the embedder resident and skips rerank")
 	}
 	if !strings.Contains(text, "Passages:") {
 		t.Fatal("try does not pass the reranker into the pipeline")
+	}
+}
+
+func TestTryRerankDirPrefersEnv(t *testing.T) {
+	root := t.TempDir()
+	embedDir := filepath.Join(root, "Qwen3-Embedding-4B")
+	sibling := filepath.Join(root, "Qwen3-Reranker-4B")
+	custom := filepath.Join(root, "bge-reranker-base")
+	for _, dir := range []string{embedDir, sibling, custom} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("URAG_RERANK_MODEL_DIR", "")
+	got, err := tryRerankDir(embedDir)
+	if err != nil || got != sibling {
+		t.Fatalf("default %s %v", got, err)
+	}
+	t.Setenv("URAG_RERANK_MODEL_DIR", custom)
+	got, err = tryRerankDir(embedDir)
+	if err != nil || got != custom {
+		t.Fatalf("env %s %v", got, err)
+	}
+	t.Setenv("URAG_RERANK_MODEL_DIR", filepath.Join(root, "missing-reranker"))
+	if _, err := tryRerankDir(embedDir); err == nil || !strings.Contains(err.Error(), "不会下载") {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenTryRerankerSelectsCrossEncoder(t *testing.T) {
+	dir := t.TempDir()
+	cfg := `{"architectures":["XLMRobertaForSequenceClassification"],"model_type":"xlm-roberta","hidden_size":768,"num_labels":1,"_name_or_path":"BAAI/bge-reranker-base"}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "model.safetensors"), []byte("fake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tokenizer.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, info, err := openTryReranker(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Kind != retrieve.KindCrossEncoder || info.Name != "BAAI/bge-reranker-base" {
+		t.Fatalf("%+v", info)
+	}
+
+	qwen := t.TempDir()
+	if err := os.WriteFile(filepath.Join(qwen, "config.json"), []byte(`{"hidden_size":2560}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(qwen, "model.safetensors"), []byte("fake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(qwen, "tokenizer.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, info, err = openTryReranker(qwen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Kind != retrieve.KindQwen4B || info.Name != "Qwen/Qwen3-Reranker-4B" {
+		t.Fatalf("%+v", info)
 	}
 }
 

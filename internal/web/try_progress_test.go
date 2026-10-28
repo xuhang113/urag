@@ -765,6 +765,40 @@ func (c *countReranker) n() int {
 	return c.calls
 }
 
+func TestTryLogsRerankModelAndTime(t *testing.T) {
+	h := publicTryHandler(t, embed.NewFixture(8), modelNoteReranker{score: 0.9}, retrieve.DefaultRerankMinScore)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	body := &lockedBuffer{}
+	if err := readTryStream(ctx, srv.URL+"/api/try", "crimson lantern", body); err != nil {
+		t.Fatal(err)
+	}
+	ev := latestStep(t, body.String(), retrieve.RerankModelStep("BAAI/bge-reranker-base"))
+	assertFinishedStep(t, ev)
+	if strings.Contains(body.String(), noRerankFilterNote) {
+		t.Fatalf("real rerank score skipped the floor\n%s", body.String())
+	}
+}
+
+type modelNoteReranker struct {
+	score float64
+}
+
+func (m modelNoteReranker) Score(ctx context.Context, _ string, passages []string) ([]float64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	embed.EmitStep(ctx, "rerank_model BAAI/bge-reranker-base")
+	out := make([]float64, len(passages))
+	for i := range out {
+		out[i] = m.score
+	}
+	embed.EmitStep(ctx, "rerank_model_done BAAI/bge-reranker-base")
+	return out, nil
+}
+
 func (p *phaseReranker) Score(ctx context.Context, _ string, passages []string) ([]float64, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

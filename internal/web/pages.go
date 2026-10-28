@@ -55,7 +55,9 @@ type askView struct {
 }
 
 type tryView struct {
-	Collection string
+	Collection  string
+	RerankModel string
+	RerankDir   string
 }
 
 type evalView struct {
@@ -173,7 +175,11 @@ func (s *server) pageAsk(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) pageTry(w http.ResponseWriter, r *http.Request) {
-	data := pageData{Page: "try", Title: "试查", Try: &tryView{Collection: "public"}}
+	data := pageData{Page: "try", Title: "试查", Try: &tryView{
+		Collection:  "public",
+		RerankModel: s.tryInfo.RerankModel,
+		RerankDir:   s.tryInfo.RerankDir,
+	}}
 	s.render(w, data)
 }
 
@@ -357,6 +363,11 @@ const askHTML = `{{define "ask"}}
 
 const tryHTML = `{{define "try"}}
 <p>只查集合 {{.Try.Collection}}。磁盘向量和这个集合的 BM25 合并后留下前 50 条。每次提问加载嵌入模型，算完查询向量后卸下嵌入，再加载重排模型，重排结束后卸下重排。下一次提问再加载嵌入。嵌入和重排不同时留在内存。页面日志写出嵌入设备。只有拿到重排分时才按分数门槛过滤，最多 8 条。没有重排分时按混合分返回最多 8 条，每条显示分数。下面按这次查询的实际顺序显示步骤。每一行有开始时间、结束时间和耗时（秒），时间是本机本地时间，精确到秒。进行中的一步有开始时间，没有结束时间，并标成未完成。</p>
+<p id="try-rerank-config">重排目录由环境变量 URAG_RERANK_MODEL_DIR 指定。未设置时默认是嵌入目录旁边的 Qwen3-Reranker-4B。页面日志写出重排模型名，以及这一步的开始时间、结束时间和耗时。</p>
+<dl class="meta" id="try-rerank">
+{{if .Try.RerankModel}}<dt>这次重排模型</dt><dd>{{.Try.RerankModel}}</dd>{{end}}
+{{if .Try.RerankDir}}<dt>这次重排目录</dt><dd>{{.Try.RerankDir}}</dd>{{end}}
+</dl>
 <form id="try-form">
 <label for="query">问题</label>
 <input id="query" name="query" required>
