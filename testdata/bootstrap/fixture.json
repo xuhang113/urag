@@ -1,0 +1,24 @@
+{
+  "collection_id": "public",
+  "probe_query": "uragfixture青石灯会",
+  "documents": [
+    {
+      "source_uri": "fixture://urag/lantern",
+      "title": "青石灯会夹具",
+      "heading_path": "夹具/灯会",
+      "body": "uragfixture青石灯会在东桥举行，游客提着纸灯走过东桥。"
+    },
+    {
+      "source_uri": "fixture://urag/canal",
+      "title": "琥珀运河夹具",
+      "heading_path": "夹具/运河",
+      "body": "uragfixture琥珀运河的粮船从北仓拱门下经过。"
+    },
+    {
+      "source_uri": "fixture://urag/library",
+      "title": "橡木目录夹具",
+      "heading_path": "夹具/图书馆",
+      "body": "uragfixture市政图书馆把卡片目录放在橡木抽屉里。"
+    }
+  ]
+}

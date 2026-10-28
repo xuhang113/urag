@@ -1,0 +1,26 @@
+# 密钥与本机环境。示例只留 .env.example。
+.env
+.env.*
+!.env.example
+config/secrets*.yaml
+*.pem
+*.key
+*.p12
+credentials.json
+service-account*.json
+
+# 权重、向量、收录原文和数据库转储不入库。
+data/
+vectors/
+*.safetensors
+*.gguf
+*.pt
+*.onnx
+pytorch_model.bin
+*.dump
+*.sql.gz
+crawl-checkpoint.json
+
+__pycache__/
+.cache/
+.DS_Store

@@ -72,6 +72,10 @@ func run(args []string) error {
 		return syncDisk(args[1:])
 	case "load-bm25":
 		return loadBM25(args[1:])
+	case "init-db":
+		return initDB(args[1:])
+	case "init-es":
+		return initES(args[1:])
 	default:
 		return fmt.Errorf("urag: unknown command %q", cmd)
 	}
