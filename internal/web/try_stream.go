@@ -20,6 +20,10 @@ const stepTimeLayout = "2006-01-02 15:04:05"
 // 混合分不套 URAG_RERANK_MIN_SCORE。句子里的 0.5 是该门槛的默认值。
 const noRerankFilterNote = "本次没有重排分，未按 0.5 过滤"
 
+// lowRerankScoreNote 是重排最高分低于 0.5 时页面上的说明。
+// 试查仍返回分数最高的命中，不用空列表代替。
+const lowRerankScoreNote = "最高分低于 0.5，仍显示前几条供查看"
+
 func wantsTryStream(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), "text/event-stream")
 }
@@ -86,6 +90,29 @@ func (s *server) streamTry(w http.ResponseWriter, r *http.Request, query string)
 	}
 }
 
+// tryResultNote 说明这次分数从哪来。
+// 没有重排分时沿用混合分说明。
+// 有重排分且最高分低于 0.5 时，告诉页面仍在显示前几条。
+// 最高分达到 0.5，或一条命中都没有时，不写这句。
+func tryResultNote(hits []retrieve.Hit, reranked bool) string {
+	if !reranked {
+		return noRerankFilterNote
+	}
+	if len(hits) == 0 {
+		return ""
+	}
+	top := hits[0].Score
+	for _, hit := range hits[1:] {
+		if hit.Score > top {
+			top = hit.Score
+		}
+	}
+	if top < retrieve.DefaultRerankMinScore {
+		return lowRerankScoreNote
+	}
+	return ""
+}
+
 func writeTryOutcome(w http.ResponseWriter, flusher http.Flusher, ctx context.Context, hits []retrieve.Hit, reranked bool, err error) {
 	if err != nil {
 		if errors.Is(err, context.Canceled) && !tryTimedOut(ctx, err) {
@@ -101,10 +128,7 @@ func writeTryOutcome(w http.ResponseWriter, flusher http.Flusher, ctx context.Co
 	if hits == nil {
 		hits = []retrieve.Hit{}
 	}
-	note := ""
-	if !reranked {
-		note = noRerankFilterNote
-	}
+	note := tryResultNote(hits, reranked)
 	raw, marshalErr := json.Marshal(struct {
 		Hits []retrieve.Hit `json:"hits"`
 		Note string         `json:"note,omitempty"`

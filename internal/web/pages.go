@@ -362,7 +362,7 @@ const askHTML = `{{define "ask"}}
 {{end}}`
 
 const tryHTML = `{{define "try"}}
-<p>只查集合 {{.Try.Collection}}。向量检索读 Milvus 里的这个集合。BM25 只在 Elasticsearch 已连接时查询；没连上时页面日志写「BM25 未连接」。合并后留下前 50 条。每次提问加载嵌入模型，算完查询向量后卸下嵌入，再加载重排模型，重排结束后卸下重排。下一次提问再加载嵌入。嵌入和重排不同时留在内存。页面日志写出嵌入设备。只有拿到重排分时才按分数门槛过滤，最多 8 条。没有重排分时按混合分返回最多 8 条，每条显示分数。下面按这次查询的实际顺序显示步骤。每一行有开始时间、结束时间和耗时（秒），时间是本机本地时间，精确到秒。进行中的一步有开始时间，没有结束时间，并标成未完成。</p>
+<p>只查集合 {{.Try.Collection}}。向量检索读 Milvus 里的这个集合。BM25 只在 Elasticsearch 已连接时查询；没连上时页面日志写「BM25 未连接」。合并后留下前 50 条。每次提问加载嵌入模型，算完查询向量后卸下嵌入，再加载重排模型，重排结束后卸下重排。下一次提问再加载嵌入。嵌入和重排不同时留在内存。页面日志写出嵌入设备。拿到重排分后按分数从高到低返回最多 8 条，每条显示原始分。最高分低于 0.5 时仍显示这些命中，并写「最高分低于 0.5，仍显示前几条供查看」。没有重排分时按混合分返回最多 8 条，每条显示分数。下面按这次查询的实际顺序显示步骤。每一行有开始时间、结束时间和耗时（秒），时间是本机本地时间，精确到秒。进行中的一步有开始时间，没有结束时间，并标成未完成。</p>
 <p id="try-rerank-config">重排目录由环境变量 URAG_RERANK_MODEL_DIR 指定。未设置时默认是嵌入目录旁边的 Qwen3-Reranker-4B。页面日志写出重排模型名，以及这一步的开始时间、结束时间和耗时。</p>
 <dl class="meta" id="try-rerank">
 {{if .Try.RerankModel}}<dt>这次重排模型</dt><dd>{{.Try.RerankModel}}</dd>{{end}}
@@ -419,7 +419,7 @@ const tryHTML = `{{define "try"}}
     status.textContent = "命中 " + hits.length + " 条";
     var table = document.createElement("table");
     var head = document.createElement("tr");
-    ["collection_id", "heading_path", "原文位置", "分数", "子块", "父块"].forEach(function (name) {
+    ["collection_id", "heading_path", "原文位置", "原始分", "子块", "父块"].forEach(function (name) {
       var th = document.createElement("th");
       th.textContent = name;
       head.appendChild(th);

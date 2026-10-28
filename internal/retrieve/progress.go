@@ -154,7 +154,7 @@ func rerankPlanFrom(ctx context.Context) (RerankPlan, bool) {
 }
 
 // rerankScoreBox 记录这次查询的重排器是否返回了分数。
-// 只复制混合分时不记。试查用它决定要不要套分数门槛。
+// 只复制混合分时不记。试查用它决定要不要写低分说明，不拿它丢掉命中。
 type rerankScoreBox struct {
 	mu  sync.Mutex
 	got bool

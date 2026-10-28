@@ -23,6 +23,42 @@ import (
 	"github.com/xuhang113/urag/internal/storage"
 )
 
+func TestTryResultNote(t *testing.T) {
+	if tryResultNote(nil, false) != noRerankFilterNote {
+		t.Fatal(tryResultNote(nil, false))
+	}
+	low := []retrieve.Hit{{Score: 0.1}, {Score: 0.4}}
+	if tryResultNote(low, true) != lowRerankScoreNote {
+		t.Fatal(tryResultNote(low, true))
+	}
+	atFloor := []retrieve.Hit{{Score: 0.1}, {Score: retrieve.DefaultRerankMinScore}}
+	if tryResultNote(atFloor, true) != "" {
+		t.Fatal(tryResultNote(atFloor, true))
+	}
+	if tryResultNote(nil, true) != "" {
+		t.Fatal("empty rerank should stay quiet")
+	}
+}
+
+func TestTryStreamShowsLowRerankScore(t *testing.T) {
+	h := publicTryHandler(t, embed.NewFixture(8), fixedPassages{score: 0.2}, retrieve.DefaultRerankMinScore)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	body := &lockedBuffer{}
+	if err := readTryStream(ctx, srv.URL+"/api/try", "crimson lantern", body); err != nil {
+		t.Fatal(err)
+	}
+	text := body.String()
+	if !strings.Contains(text, lowRerankScoreNote) || !strings.Contains(text, `"score":0.2`) || !strings.Contains(text, `"chunk_id":"c1"`) {
+		t.Fatalf("low rerank result\n%s", text)
+	}
+	if strings.Contains(text, "没有足够相关的片段") || strings.Contains(text, retrieve.StepFilter(retrieve.DefaultRerankMinScore)) {
+		t.Fatalf("low scores were filtered\n%s", text)
+	}
+}
+
 func TestTryStreamKeepsLaterStagesUnfinished(t *testing.T) {
 	emb := &phaseEmbedder{dim: 8, phase: make(chan string), next: make(chan struct{})}
 	h := publicTryHandler(t, emb, &phaseReranker{emb: emb, score: 0.9}, retrieve.DefaultRerankMinScore)
@@ -83,7 +119,6 @@ func TestTryStreamKeepsLaterStagesUnfinished(t *testing.T) {
 		retrieve.StepLoadRerank,
 		retrieve.StepRerank,
 		retrieve.StepUnloadRerank,
-		retrieve.StepFilter(retrieve.DefaultRerankMinScore),
 		retrieve.StepParents,
 	}
 	assertStepOrder(t, body.String(), finished)
@@ -97,8 +132,11 @@ func TestTryStreamKeepsLaterStagesUnfinished(t *testing.T) {
 	if !strings.Contains(body.String(), "父节正文") || !strings.Contains(body.String(), `"collection_id":"public"`) {
 		t.Fatalf("result %s", body.String())
 	}
-	if strings.Contains(body.String(), noRerankFilterNote) {
-		t.Fatalf("reranked query said there was no rerank score\n%s", body.String())
+	if strings.Contains(body.String(), noRerankFilterNote) || strings.Contains(body.String(), lowRerankScoreNote) {
+		t.Fatalf("reranked query hid a score above 0.5\n%s", body.String())
+	}
+	if strings.Contains(body.String(), retrieve.StepFilter(retrieve.DefaultRerankMinScore)) {
+		t.Fatalf("reranked query still dropped hits\n%s", body.String())
 	}
 }
 

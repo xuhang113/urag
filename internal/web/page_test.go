@@ -431,6 +431,9 @@ func TestPageTry(t *testing.T) {
 	if !strings.Contains(body, "没有足够相关的片段") {
 		t.Fatalf("try page missing empty copy: %s", body)
 	}
+	if !strings.Contains(body, "原始分") || !strings.Contains(body, "最高分低于 0.5，仍显示前几条供查看") {
+		t.Fatalf("try page still drops low rerank scores: %s", body)
+	}
 	if !strings.Contains(body, `id="try-log"`) || !strings.Contains(body, "未完成") || !strings.Contains(body, "text/event-stream") {
 		t.Fatalf("try page missing progress log: %s", body)
 	}
@@ -499,14 +502,14 @@ func TestPageTry(t *testing.T) {
 	}
 }
 
-func TestPageTryDropsLowRerankScore(t *testing.T) {
-	low := postPublicTry(t, retrieve.DefaultRerankMinScore, retrieve.DefaultRerankMinScore)
-	if len(low) != 0 {
-		t.Fatalf("score at the threshold was returned: %+v", low)
+func TestPageTryKeepsLowRerankScore(t *testing.T) {
+	at := postPublicTry(t, retrieve.DefaultRerankMinScore, retrieve.DefaultRerankMinScore)
+	if len(at) != 1 || at[0].ChunkID != "c1" || at[0].Score != retrieve.DefaultRerankMinScore {
+		t.Fatalf("score at the threshold was dropped: %+v", at)
 	}
 	below := postPublicTry(t, 0.2, retrieve.DefaultRerankMinScore)
-	if len(below) != 0 {
-		t.Fatalf("low score was returned: %+v", below)
+	if len(below) != 1 || below[0].ChunkID != "c1" || below[0].CollectionID != "public" || below[0].Score != 0.2 {
+		t.Fatalf("low score was dropped: %+v", below)
 	}
 	high := postPublicTry(t, retrieve.DefaultRerankMinScore+0.1, retrieve.DefaultRerankMinScore)
 	if len(high) != 1 || high[0].ChunkID != "c1" || high[0].CollectionID != "public" {

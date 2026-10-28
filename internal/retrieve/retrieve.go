@@ -62,7 +62,10 @@ const (
 	// DefaultRerankMinScore 是未设置 URAG_RERANK_MIN_SCORE 时的门槛。
 	// Qwen rerank 分数，低于此视为不相关。
 	// 这个分数是 yes 相对 no 的概率；0.5 表示模型并不判这段正文相关。
-	// 试查页和 urag search 用它丢掉低分命中。夹具评价不读它，仍按原排序算 Recall。
+	// urag search 用它丢掉低分命中。
+	// 试查页不丢：重排后仍返回分数最高的最多 8 条，并显示这个分数。
+	// 最高分低于这里时，试查页写明仍在显示前几条。
+	// 夹具评价不读它，仍按原排序算 Recall。
 	DefaultRerankMinScore = 0.5
 )
 
