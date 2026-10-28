@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/milvus-io/milvus-sdk-go/v2/entity"
+
 	"github.com/xuhang113/urag/internal/embed"
 )
 
@@ -150,6 +152,28 @@ func TestMilvusOneCollectionVectorAndKeyword(t *testing.T) {
 	}
 	if len(fake.rows["alpha"]) != 1 {
 		t.Fatalf("mismatch wrote rows: %+v", fake.rows["alpha"])
+	}
+}
+
+func TestHNSWSearchEFLargerThanTopK(t *testing.T) {
+	cases := []struct {
+		topK int
+		want int
+	}{
+		{topK: 200, want: 256},
+		{topK: 1, want: 256},
+		{topK: 255, want: 256},
+		{topK: 256, want: 257},
+		{topK: 1000, want: 1001},
+	}
+	for _, tc := range cases {
+		ef := hnswSearchEF(tc.topK)
+		if ef != tc.want || ef <= tc.topK {
+			t.Fatalf("topK %d ef %d want %d", tc.topK, ef, tc.want)
+		}
+		if _, err := entity.NewIndexHNSWSearchParam(ef); err != nil {
+			t.Fatalf("topK %d ef %d: %v", tc.topK, ef, err)
+		}
 	}
 }
 

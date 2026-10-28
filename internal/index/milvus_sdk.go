@@ -206,11 +206,21 @@ func (s *sdkSession) ChunkVersions(ctx context.Context, name string) (map[string
 	}
 }
 
+// hnswSearchEF 是 HNSW 搜索的 ef。Milvus 要求 ef 大于本次的 k。
+// 向量候选 topK 为 200 时，ef 取 256。k 不小于 256 时，ef 取 k+1。
+func hnswSearchEF(topK int) int {
+	const floor = 256
+	if topK < floor {
+		return floor
+	}
+	return topK + 1
+}
+
 func (s *sdkSession) Search(ctx context.Context, name string, vec []float32, topK int) ([]milvusHit, error) {
 	if err := s.cli.LoadCollection(ctx, name, false); err != nil {
 		return nil, err
 	}
-	sp, err := entity.NewIndexHNSWSearchParam(64)
+	sp, err := entity.NewIndexHNSWSearchParam(hnswSearchEF(topK))
 	if err != nil {
 		return nil, err
 	}
